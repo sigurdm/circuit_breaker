@@ -15,7 +15,9 @@ Future<T> executeWithRetry<T>(
   while (true) {
     try {
       attempts++;
-      state.totalRequests++;
+      state.retryHistory.add(
+        RetryAttemptRecord(DateTime.now(), isRetry: attempts > 1),
+      );
       return await operation();
     } catch (e) {
       if (attempts >= retryConfig.maxAttempts) {
@@ -23,10 +25,13 @@ Future<T> executeWithRetry<T>(
       }
 
       // Check retry budget.
-      // Only enforce after a minimum number of requests to avoid failing initial retries.
-      if (state.totalRequests > retryConfig.minRequestsForBudget &&
-          state.totalRetries >=
-              state.totalRequests * retryConfig.retryBudgetRatio) {
+      state.cleanHistory(DateTime.now());
+      final totalRequests = state.retryHistory.length;
+      final totalRetries = state.retryHistory.where((r) => r.isRetry).length;
+
+      if (totalRequests > retryConfig.minRequestsForBudget &&
+          (totalRetries + 1) >=
+              (totalRequests + 1) * retryConfig.retryBudgetRatio) {
         rethrow; // Budget exceeded
       }
 
@@ -34,8 +39,6 @@ Future<T> executeWithRetry<T>(
       if (retryOn != null && !retryOn(e)) {
         rethrow;
       }
-
-      state.totalRetries++;
 
       // Calculate delay with exponential backoff and full jitter
       final delay = _calculateDelay(attempts, retryConfig);

@@ -31,8 +31,8 @@ void main() {
 
       expect(result, 'success');
       expect(attempts, 1);
-      expect(state.totalRequests, 1);
-      expect(state.totalRetries, 0);
+      expect(state.retryHistory.length, 1);
+      expect(state.retryHistory.where((r) => r.isRetry).length, 0);
     });
 
     test('retries on failure and succeeds', () async {
@@ -51,8 +51,8 @@ void main() {
 
       expect(result, 'success');
       expect(attempts, 3);
-      expect(state.totalRequests, 3);
-      expect(state.totalRetries, 2);
+      expect(state.retryHistory.length, 3);
+      expect(state.retryHistory.where((r) => r.isRetry).length, 2);
     });
 
     test('fails after max attempts', () async {
@@ -71,14 +71,20 @@ void main() {
       );
 
       expect(attempts, 3);
-      expect(state.totalRequests, 3);
-      expect(state.totalRetries, 2);
+      expect(state.retryHistory.length, 3);
+      expect(state.retryHistory.where((r) => r.isRetry).length, 2);
     });
 
     test('enforces retry budget', () async {
       // Setup state to trigger budget (totalRequests > 10 and retries >= 10%)
-      state.totalRequests = 11;
-      state.totalRetries = 2; // ~18%
+      // We add 9 initial requests (not retries) and 2 retries.
+      for (int i = 0; i < 9; i++) {
+        state.retryHistory.add(
+          RetryAttemptRecord(DateTime.now(), isRetry: false),
+        );
+      }
+      state.retryHistory.add(RetryAttemptRecord(DateTime.now(), isRetry: true));
+      state.retryHistory.add(RetryAttemptRecord(DateTime.now(), isRetry: true));
 
       int attempts = 0;
 
@@ -96,8 +102,11 @@ void main() {
 
       // Should fail immediately on first attempt because budget is exceeded
       expect(attempts, 1);
-      expect(state.totalRequests, 12);
-      expect(state.totalRetries, 2); // No new retries allowed
+      expect(state.retryHistory.length, 12); // 11 preset + 1 new attempt
+      expect(
+        state.retryHistory.where((r) => r.isRetry).length,
+        2,
+      ); // No new retries allowed
     });
 
     test('retryOn filtering - retries when true', () async {

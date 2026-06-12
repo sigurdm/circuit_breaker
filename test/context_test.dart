@@ -3,20 +3,35 @@ import 'package:test/test.dart';
 import 'package:circuit_breaker/circuit_breaker.dart';
 
 void main() {
-  group('RetryContext with Hierarchy', () {
-    late RetryContext context;
+  group('ResilienceContext with Hierarchy', () {
+    late ResilienceContext context;
     late Resource resource;
     late Operation readOp;
     late Operation writeOp;
 
     setUp(() {
-      context = RetryContext();
-      resource = const Resource('my-service', config: ResourceConfig(
-        circuitBreaker: CircuitBreakerConfig(failureThreshold: 2),
-        throttling: ThrottlingConfig(k: 100.0), // Prevent throttling from interfering
-      ));
-      readOp = Operation('read', resource, hedgingOverride: const HedgingConfig(enabled: true, delay: Duration(milliseconds: 10)));
-      writeOp = Operation('write', resource); // Uses defaults (hedging disabled)
+      context = ResilienceContext();
+      resource = const Resource(
+        'my-service',
+        config: ResourceConfig(
+          circuitBreaker: CircuitBreakerConfig(failureThreshold: 2),
+          throttling: ThrottlingConfig(
+            k: 100.0,
+          ), // Prevent throttling from interfering
+        ),
+      );
+      readOp = Operation(
+        'read',
+        resource,
+        hedgingOverride: const HedgingConfig(
+          enabled: true,
+          delay: Duration(milliseconds: 10),
+        ),
+      );
+      writeOp = Operation(
+        'write',
+        resource,
+      ); // Uses defaults (hedging disabled)
     });
 
     test('shared circuit breaker state', () async {
@@ -36,14 +51,16 @@ void main() {
       // Circuit should be open now for the resource
       expect(
         () => context.execute(readOp, () async => 'success'),
-        throwsA(predicate((e) => e.toString().contains('Circuit breaker is open'))),
+        throwsA(
+          predicate((e) => e.toString().contains('Circuit breaker is open')),
+        ),
       );
     });
 
     test('independent hedging configuration', () async {
       // Read operation has hedging enabled
       final readCompleter = Completer<String>();
-      
+
       // We don't complete it immediately to trigger hedging
       final future = context.executeCancelable(readOp, (cancel) async {
         if (cancel.isCompleted) return 'cancelled';
@@ -59,7 +76,7 @@ void main() {
       });
 
       expect(await future2, equals('hedged'));
-      
+
       // Clean up the first request
       readCompleter.complete('done');
       await future;

@@ -12,55 +12,24 @@
 ///
 /// ## Usage
 ///
-/// The main entry point is [RetryContext]. You can use it to execute operations
+/// The main entry point is [ResilienceContext]. You can use it to execute operations
 /// with configured policies for named resources.
 ///
-/// ```dart
-/// import 'package:circuit_breaker/circuit_breaker.dart';
-///
-/// void main() async {
-///   final context = RetryContext();
-///
-///   // Define a resource with base configuration
-///   final myService = Resource('my-service', config: ResourceConfig(
-///     circuitBreaker: CircuitBreakerConfig(failureThreshold: 3),
-///   ));
-///
-///   // Define operations on that resource
-///   final readOp = Operation('read', myService, hedgingOverride: HedgingConfig(enabled: true));
-///   final writeOp = Operation('write', myService);
-///
-///   // Execute an operation that supports cancellation
-///   try {
-///     final result = await context.executeCancelable(readOp, (cancelSignal) async {
-///       final work = Future.delayed(Duration(seconds: 1), () => 'result');
-///       return await Future.any([
-///         work,
-///         cancelSignal.future.then((_) => throw Exception('Cancelled')),
-///       ]);
-///     });
-///     print(result);
-///   } catch (e) {
-///     print('Failed: $e');
-///   }
-///
-///   // Execute a simple operation without cancellation
-///   final writeResult = await context.execute(writeOp, () async {
-///     return await makeNetworkCall();
-///   });
-/// ```
-/// }
-/// ```
+/// {@example /example/main.dart}
 library circuit_breaker;
 
 export 'src/context.dart'
     show
-        RetryContext,
+        ResilienceContext,
         Resource,
         Operation,
+        Criticality,
         ResourceConfig,
         CircuitBreakerConfig,
         RetryConfig,
         ThrottlingConfig,
         HedgingConfig;
+
 export 'src/throttling.dart' show ThrottledException;
+export 'src/exceptions.dart'
+    show CircuitBreakerOpenException, ResilienceTimeoutException;

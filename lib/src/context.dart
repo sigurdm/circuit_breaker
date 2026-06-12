@@ -3,6 +3,7 @@ import 'circuit_breaker.dart';
 import 'retry.dart';
 import 'hedging.dart';
 import 'throttling.dart';
+import 'exceptions.dart';
 
 /// Configuration for a specific resource's resilience policies.
 ///
@@ -22,6 +23,8 @@ import 'throttling.dart';
 ///   hedging: HedgingConfig(enabled: true, delay: Duration(milliseconds: 200)),
 /// );
 /// ```
+bool _defaultFailureClassifier(Object _) => true;
+
 class ResourceConfig {
   /// Configuration for the circuit breaker mechanism.
   final CircuitBreakerConfig circuitBreaker;
@@ -35,6 +38,17 @@ class ResourceConfig {
   /// Configuration for the request hedging mechanism.
   final HedgingConfig hedging;
 
+  /// The maximum duration allowed for the entire operation (including retries and hedges).
+  ///
+  /// If null, no timeout is enforced.
+  final Duration? timeout;
+
+  /// A function that determines whether a given exception is considered a
+  /// system failure (trips circuit breaker, counts as failure for throttling).
+  ///
+  /// By default, all exceptions are considered failures.
+  final bool Function(Object) failureClassifier;
+
   /// Creates a new [ResourceConfig] with the specified policies.
   ///
   /// Defaults are used for any omitted configuration.
@@ -43,6 +57,8 @@ class ResourceConfig {
     this.retry = const RetryConfig(),
     this.throttling = const ThrottlingConfig(),
     this.hedging = const HedgingConfig(),
+    this.timeout,
+    this.failureClassifier = _defaultFailureClassifier,
   });
 
   /// Creates a default configuration.
@@ -69,13 +85,13 @@ class Resource {
 enum Criticality {
   /// Reserved for the most critical requests (e.g., those directly impacting UI).
   criticalPlus,
-  
+
   /// Default for normal production requests.
   critical,
-  
+
   /// Batch traffic, retries.
   sheddablePlus,
-  
+
   /// Highly sheddable traffic (e.g., pre-fetching).
   sheddable,
 }
@@ -185,6 +201,9 @@ class RetryConfig {
   /// The fraction of requests that can be retries (e.g., 0.1 for 10%).
   final double retryBudgetRatio;
 
+  /// The duration of the rolling window used to calculate the retry budget.
+  final Duration budgetWindow;
+
   /// Creates a [RetryConfig].
   const RetryConfig({
     this.maxAttempts = 3,
@@ -194,6 +213,7 @@ class RetryConfig {
     this.enableJitter = true,
     this.minRequestsForBudget = 10,
     this.retryBudgetRatio = 0.1,
+    this.budgetWindow = const Duration(minutes: 1),
   });
 }
 
@@ -274,7 +294,7 @@ class HedgingConfig {
 ///
 /// Example:
 /// ```dart
-/// final context = RetryContext();
+/// final context = ResilienceContext();
 ///
 /// // Configure specific resource
 /// context.configure('users-api', ResourceConfig(
@@ -290,8 +310,11 @@ class HedgingConfig {
 ///   print('Operation failed or was throttled: $e');
 /// }
 /// ```
-class RetryContext {
+class ResilienceContext {
   final Map<String, ResourceState> _states = {};
+
+  /// Gets the states for all resources.
+  Map<String, ResourceState> get states => _states;
 
   /// Gets or creates the state for a specific resource.
   ResourceState _getState(Resource resource) {
@@ -309,11 +332,7 @@ class RetryContext {
     Future<T> Function() action, {
     bool Function(Object)? retryOn,
   }) {
-    return executeCancelable(
-      operation,
-      (_) => action(),
-      retryOn: retryOn,
-    );
+    return executeCancelable(operation, (_) => action(), retryOn: retryOn);
   }
 
   /// Executes an operation with the configured resilience policies.
@@ -331,7 +350,8 @@ class RetryContext {
   /// will trigger retries (up to max attempts).
   ///
   /// Throws [ThrottledException] if the request is rejected by adaptive throttling.
-  /// Throws [Exception] if the circuit breaker is open.
+  /// Throws [CircuitBreakerOpenException] if the circuit breaker is open.
+  /// Throws [ResilienceTimeoutException] if the operation times out.
   /// Rethrows the last exception if all retries fail.
   Future<T> executeCancelable<T>(
     Operation operation,
@@ -340,17 +360,19 @@ class RetryContext {
   }) async {
     final resource = operation.resource;
     final state = _getState(resource);
-    
+
     // Fallback chain for configs: Operation Override -> Resource Config -> Default
     final hedgingConfig = operation.hedgingOverride ?? resource.config.hedging;
     final retryConfig = operation.retryOverride ?? resource.config.retry;
-    
+
     // We create a temporary config for this execution if there are overrides
     final execConfig = ResourceConfig(
       circuitBreaker: resource.config.circuitBreaker,
       throttling: resource.config.throttling,
       retry: retryConfig,
       hedging: hedgingConfig,
+      timeout: resource.config.timeout,
+      failureClassifier: resource.config.failureClassifier,
     );
 
     final throttler = AdaptiveThrottler(execConfig, state);
@@ -358,31 +380,94 @@ class RetryContext {
 
     // 1. Adaptive Throttling
     if (throttler.shouldThrottle(operation.criticality)) {
-      state.requestHistory[operation.criticality]!.add(RequestRecord(DateTime.now(), false));
+      state.recordRequest(false, operation.criticality);
       throw ThrottledException('Request throttled for ${resource.name}');
     }
 
     // 2. Circuit Breaker
     if (!circuitBreaker.isAllowed) {
-      state.requestHistory[operation.criticality]!.add(RequestRecord(DateTime.now(), false));
-      throw Exception('Circuit breaker is open for ${resource.name}');
+      state.recordRequest(false, operation.criticality);
+      throw CircuitBreakerOpenException(
+        'Circuit breaker is open for ${resource.name}',
+      );
     }
 
-    try {
-      final result = await executeWithRetry(
-        () => executeWithHedging(action, config: execConfig, state: state),
+    final topLevelCancel = Completer<void>();
+
+    // Wrap action to record attempt outcomes
+    Future<T> instrumentedAction(Completer<void> cancel) async {
+      final combinedCancel = Completer<void>();
+
+      void onCancel() {
+        if (!combinedCancel.isCompleted) {
+          combinedCancel.complete();
+        }
+      }
+
+      unawaited(cancel.future.then((_) => onCancel()));
+      unawaited(topLevelCancel.future.then((_) => onCancel()));
+
+      try {
+        final result = await action(combinedCancel);
+        if (!combinedCancel.isCompleted) {
+          circuitBreaker.recordSuccess();
+          state.recordRequest(true, operation.criticality);
+        }
+        return result;
+      } catch (e) {
+        if (!combinedCancel.isCompleted) {
+          if (execConfig.failureClassifier(e)) {
+            circuitBreaker.recordFailure();
+            state.recordRequest(false, operation.criticality);
+          } else {
+            circuitBreaker.recordSuccess();
+            state.recordRequest(true, operation.criticality);
+          }
+        }
+        rethrow;
+      }
+    }
+
+    final executionFuture = executeWithRetry(
+      () => executeWithHedging(
+        instrumentedAction,
         config: execConfig,
         state: state,
-        retryOn: retryOn,
-      );
+      ),
+      config: execConfig,
+      state: state,
+      retryOn: retryOn,
+    );
 
-      circuitBreaker.recordSuccess();
-      state.requestHistory[operation.criticality]!.add(RequestRecord(DateTime.now(), true));
-      return result;
-    } catch (e) {
-      circuitBreaker.recordFailure();
-      state.requestHistory[operation.criticality]!.add(RequestRecord(DateTime.now(), false));
-      rethrow;
+    if (execConfig.timeout != null) {
+      final timeout = execConfig.timeout!;
+      final timer = Timer(timeout, () {
+        if (!topLevelCancel.isCompleted) {
+          topLevelCancel.complete();
+        }
+      });
+
+      try {
+        final result = await Future.any([
+          executionFuture,
+          topLevelCancel.future.then(
+            (_) => throw ResilienceTimeoutException(
+              'Operation timed out after $timeout',
+            ),
+          ),
+        ]);
+        timer.cancel();
+        return result;
+      } catch (e) {
+        timer.cancel();
+        if (e is ResilienceTimeoutException) {
+          circuitBreaker.recordFailure();
+          state.recordRequest(false, operation.criticality);
+        }
+        rethrow;
+      }
+    } else {
+      return await executionFuture;
     }
   }
 }
@@ -407,16 +492,24 @@ class ResourceState {
   };
 
   // Retry Budget State
-  int totalRequests = 0;
-  int totalRetries = 0;
+  final List<RetryAttemptRecord> retryHistory = [];
 
   ResourceState(this.config);
+
+  void recordRequest(bool accepted, Criticality criticality) {
+    requestHistory[criticality]!.add(RequestRecord(DateTime.now(), accepted));
+  }
 
   void cleanHistory(DateTime now) {
     final cutoff = now.subtract(config.throttling.windowDuration);
     for (final history in requestHistory.values) {
       history.removeWhere((record) => record.timestamp.isBefore(cutoff));
     }
+
+    final retryCutoff = now.subtract(config.retry.budgetWindow);
+    retryHistory.removeWhere(
+      (record) => record.timestamp.isBefore(retryCutoff),
+    );
   }
 }
 
@@ -429,4 +522,16 @@ class RequestRecord {
   final bool accepted;
 
   RequestRecord(this.timestamp, this.accepted);
+}
+
+/// Records a retry attempt for budget calculations.
+final class RetryAttemptRecord {
+  /// The timestamp of the attempt.
+  final DateTime timestamp;
+
+  /// Whether this attempt was a retry (true) or the initial request (false).
+  final bool isRetry;
+
+  /// Creates a [RetryAttemptRecord].
+  const RetryAttemptRecord(this.timestamp, {required this.isRetry});
 }

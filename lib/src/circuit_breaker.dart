@@ -55,7 +55,7 @@ class CircuitBreaker {
   void recordFailure() {
     state.failureCount++;
     state.lastFailureTime = DateTime.now();
-    
+
     final cbConfig = config.circuitBreaker;
 
     if (state.circuitState == CircuitState.halfOpen) {

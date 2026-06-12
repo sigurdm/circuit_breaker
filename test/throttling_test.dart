@@ -24,8 +24,12 @@ void main() {
     });
 
     test('does not throttle when all requests accepted', () {
-      state.requestHistory[Criticality.critical]!.add(RequestRecord(DateTime.now(), true));
-      state.requestHistory[Criticality.critical]!.add(RequestRecord(DateTime.now(), true));
+      state.requestHistory[Criticality.critical]!.add(
+        RequestRecord(DateTime.now(), true),
+      );
+      state.requestHistory[Criticality.critical]!.add(
+        RequestRecord(DateTime.now(), true),
+      );
       expect(throttler.shouldThrottle(Criticality.critical), isFalse);
     });
 
@@ -33,7 +37,9 @@ void main() {
       // Formula: P = max(0, (requests - K * accepts) / (requests + 1))
       // Add 10 failed requests
       for (int i = 0; i < 10; i++) {
-        state.requestHistory[Criticality.critical]!.add(RequestRecord(DateTime.now(), false));
+        state.requestHistory[Criticality.critical]!.add(
+          RequestRecord(DateTime.now(), false),
+        );
       }
 
       // requests = 10, accepts = 0
@@ -56,8 +62,12 @@ void main() {
       () {
         // Add 5 accepted and 5 failed requests
         for (int i = 0; i < 5; i++) {
-          state.requestHistory[Criticality.critical]!.add(RequestRecord(DateTime.now(), true));
-          state.requestHistory[Criticality.critical]!.add(RequestRecord(DateTime.now(), false));
+          state.requestHistory[Criticality.critical]!.add(
+            RequestRecord(DateTime.now(), true),
+          );
+          state.requestHistory[Criticality.critical]!.add(
+            RequestRecord(DateTime.now(), false),
+          );
         }
 
         // requests = 10, accepts = 5
@@ -78,7 +88,9 @@ void main() {
     test('throttling is isolated per criticality', () {
       // Add 10 failed requests for sheddable
       for (int i = 0; i < 10; i++) {
-        state.requestHistory[Criticality.sheddable]!.add(RequestRecord(DateTime.now(), false));
+        state.requestHistory[Criticality.sheddable]!.add(
+          RequestRecord(DateTime.now(), false),
+        );
       }
 
       // sheddable should be throttled

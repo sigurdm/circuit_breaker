@@ -41,7 +41,9 @@ class AdaptiveThrottler {
 
   /// Records a request attempt.
   void recordRequest(bool accepted, Criticality criticality) {
-    state.requestHistory[criticality]!.add(RequestRecord(DateTime.now(), accepted));
+    state.requestHistory[criticality]!.add(
+      RequestRecord(DateTime.now(), accepted),
+    );
   }
 }
 
