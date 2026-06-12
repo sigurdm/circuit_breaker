@@ -481,7 +481,6 @@ class ResourceState {
   int failureCount = 0;
   DateTime? lastFailureTime;
   CircuitState circuitState = CircuitState.closed;
-  int halfOpenRequests = 0;
 
   // Throttling State (isolated per criticality)
   final Map<Criticality, List<RequestRecord>> requestHistory = {

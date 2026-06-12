@@ -38,9 +38,7 @@ class AdaptiveThrottler {
     final random = Random();
     return random.nextDouble() < p;
   }
-
 }
-
 
 /// Exception thrown when a request is throttled by the client.
 ///

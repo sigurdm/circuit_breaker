@@ -24,20 +24,13 @@ class CircuitBreaker {
       if (now.difference(state.lastFailureTime!) > cbConfig.resetTimeout) {
         // Transition to half-open
         state.circuitState = CircuitState.halfOpen;
-        state.halfOpenRequests = 1; // Count this request
         return true;
       }
       return false;
     }
 
-    // Half-open: allow a limited number of requests to test the service.
-    // We limit to 1 concurrent request in half-open state to avoid flooding.
-    if (state.halfOpenRequests >= 1) {
-      return false;
-    }
-
-    state.halfOpenRequests++;
-    return true;
+    // Half-open: block all subsequent requests while the trial request is in progress.
+    return false;
   }
 
   /// Records a successful operation.
@@ -45,7 +38,6 @@ class CircuitBreaker {
     if (state.circuitState == CircuitState.halfOpen) {
       state.circuitState = CircuitState.closed;
       state.failureCount = 0;
-      state.halfOpenRequests = 0; // Reset
     } else if (state.circuitState == CircuitState.closed) {
       state.failureCount = 0; // Reset count on success
     }
@@ -60,7 +52,6 @@ class CircuitBreaker {
 
     if (state.circuitState == CircuitState.halfOpen) {
       state.circuitState = CircuitState.open;
-      state.halfOpenRequests = 0; // Reset
     } else if (state.failureCount >= cbConfig.failureThreshold) {
       state.circuitState = CircuitState.open;
     }

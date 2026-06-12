@@ -244,5 +244,137 @@ void main() {
         expect(history.every((r) => !r.accepted), isTrue);
       });
     });
+
+    group('ResourceConfig', () {
+      test('defaultConfig creates default config', () {
+        final config = ResourceConfig.defaultConfig();
+        expect(config.timeout, isNull);
+        expect(config.circuitBreaker.failureThreshold, equals(5));
+      });
+    });
+
+    group('Exceptions toString', () {
+      test('CircuitBreakerOpenException toString', () {
+        final e = CircuitBreakerOpenException('open');
+        expect(e.toString(), contains('CircuitBreakerOpenException: open'));
+      });
+
+      test('ResilienceTimeoutException toString', () {
+        final e = ResilienceTimeoutException('timeout');
+        expect(e.toString(), contains('ResilienceTimeoutException: timeout'));
+      });
+
+      test('ThrottledException toString', () {
+        final e = ThrottledException('throttled');
+        expect(e.toString(), contains('ThrottledException: throttled'));
+      });
+    });
+
+    group('Throttling Integration', () {
+      test('throws ThrottledException when throttling kicks in', () async {
+        resource = Resource(
+          'throttling-service',
+          config: const ResourceConfig(
+            throttling: ThrottlingConfig(
+              k: 1.0, // Strict throttling
+              windowDuration: Duration(seconds: 10),
+            ),
+          ),
+        );
+        op = Operation(
+          'call',
+          resource,
+          retryOverride: const RetryConfig(maxAttempts: 1),
+        );
+
+        // Cause 5 failures to trigger throttling (accepts = 0)
+        for (int i = 0; i < 5; i++) {
+          try {
+            await context.execute(op, () async => throw Exception('fail'));
+          } catch (_) {}
+        }
+
+        // Next call should have high probability of being throttled.
+        bool throttled = false;
+        for (int i = 0; i < 20; i++) {
+          try {
+            await context.execute(op, () async => 'success');
+          } on ThrottledException catch (e) {
+            throttled = true;
+            expect(
+              e.message,
+              contains('Request throttled for throttling-service'),
+            );
+            break;
+          } catch (_) {}
+        }
+        expect(throttled, isTrue);
+      });
+    });
+
+    group('Hedging Gaps', () {
+      test('fails immediately if f1 fails before delay', () async {
+        resource = Resource(
+          'hedging-fail-service',
+          config: const ResourceConfig(
+            hedging: HedgingConfig(
+              enabled: true,
+              delay: Duration(milliseconds: 100),
+            ),
+            retry: RetryConfig(
+              maxAttempts: 1,
+            ), // Disable retry to see immediate failure
+          ),
+        );
+        op = Operation('call', resource);
+
+        int attempts = 0;
+        final execution = context.execute(op, () async {
+          attempts++;
+          if (attempts == 1) {
+            throw Exception('immediate fail');
+          }
+          return 'success';
+        });
+
+        await expectLater(
+          execution,
+          throwsA(predicate((e) => e.toString().contains('immediate fail'))),
+        );
+        expect(attempts, 1); // No second attempt started
+      });
+
+      test('throws error if both hedges fail', () async {
+        resource = Resource(
+          'hedging-both-fail-service',
+          config: const ResourceConfig(
+            hedging: HedgingConfig(
+              enabled: true,
+              delay: Duration(milliseconds: 10),
+            ),
+            retry: RetryConfig(maxAttempts: 1),
+          ),
+        );
+        op = Operation('call', resource);
+
+        int attempts = 0;
+        final execution = context.executeCancelable(op, (cancel) async {
+          attempts++;
+          if (attempts == 1) {
+            await Future.delayed(const Duration(milliseconds: 50));
+            throw Exception('f1 fail');
+          } else {
+            throw Exception('f2 fail');
+          }
+        });
+
+        await expectLater(
+          execution,
+          throwsA(predicate((e) => e.toString().contains('f1 fail'))),
+        );
+
+        expect(attempts, 2);
+      });
+    });
   });
 }
