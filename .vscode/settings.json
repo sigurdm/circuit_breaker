@@ -1,0 +1,6 @@
+{
+  "dart.sdkPaths": [
+    "~/.dvm/darts"
+  ],
+  "dart.sdkPath": "~/.dvm/darts/3.11.0"
+}
