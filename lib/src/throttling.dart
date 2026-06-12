@@ -39,13 +39,8 @@ class AdaptiveThrottler {
     return random.nextDouble() < p;
   }
 
-  /// Records a request attempt.
-  void recordRequest(bool accepted, Criticality criticality) {
-    state.requestHistory[criticality]!.add(
-      RequestRecord(DateTime.now(), accepted),
-    );
-  }
 }
+
 
 /// Exception thrown when a request is throttled by the client.
 ///
