@@ -19,9 +19,11 @@ A resilience library for Dart applications implementing patterns for distributed
 
 When a backend is overloaded, client retries can exacerbate the issue (retry storms). Adaptive throttling client-side calculates a rejection probability based on the ratio of accepted requests to total requests:
 
-$$P_{\text{throttle}} = \max\left(0, \frac{\text{requests} - K \times \text{accepts}}{\text{requests} + 1}\right)$$
+```
+P_throttle = max(0, (requests - K × accepts) / (requests + 1))
+```
 
-Where $K$ is the acceptance multiplier (e.g., `2.0`). If $K = 2$, the client will allow at most twice as many requests as the backend is successfully accepting. Excess requests are rejected locally with a `ThrottledException`.
+Where `K` is the acceptance multiplier (e.g., `2.0`). If `K = 2`, the client will allow at most twice as many requests as the backend is successfully accepting. Excess requests are rejected locally with a `ThrottledException`.
 
 ### Circuit Breaking (Failing Fast)
 
@@ -36,7 +38,7 @@ The circuit breaker transitions through three states:
 ### Request Hedging (Tail Latency Mitigation)
 
 Speculatively sends a second, parallel request if the first request does not complete within a configured delay. 
-If a service has a 5% chance of taking >1s, hedging after 1s reduces the probability of both requests taking >1s to $0.05 \times 0.05 = 0.25\%$, significantly reducing tail latency at the cost of at most 5% extra traffic.
+If a service has a 5% chance of taking >1s, hedging after 1s reduces the probability of both requests taking >1s to `0.05 × 0.05 = 0.25%`, significantly reducing tail latency at the cost of at most 5% extra traffic.
 
 The library supports two modes of hedging:
 *   **Static Hedging**: Uses a fixed pre-configured delay.
@@ -135,15 +137,15 @@ final userAction = Operation(
 );
 ```
 
-To enable this, `ThrottlingConfig` automatically spreads the sensitivity multiplier ($K$) across different criticality levels.
+To enable this, `ThrottlingConfig` automatically spreads the sensitivity multiplier (`K`) across different criticality levels.
 
-By default, `ThrottlingConfig(k: base, spread: 1.0)` calculates the effective $K$ for each level as:
+By default, `ThrottlingConfig(k: base, spread: 1.0)` calculates the effective `K` for each level as:
 *   **`criticalPlus`**: `k * 4.0` (tolerant to failures, default `8.0`).
 *   **`critical`** (default level): `k` (default `2.0`).
 *   **`sheddablePlus`**: `max(k * 0.8, 1.1)` (default `1.6`).
 *   **`sheddable`**: `max(k * 0.6, 1.1)` (default `1.2`).
 
-A lower $K$ makes throttling more aggressive. Under default settings, `sheddable` traffic starts throttling earlier (when failures exceed 16%), while `critical` traffic tolerates up to 50% failures, and `criticalPlus` is shielded from throttling.
+A lower `K` makes throttling more aggressive. Under default settings, `sheddable` traffic starts throttling earlier (when failures exceed 16%), while `critical` traffic tolerates up to 50% failures, and `criticalPlus` is shielded from throttling.
 
 You can adjust the width of this spread using the `spread` parameter (setting `spread: 0.0` collapses all levels to use the same base `k`).
 
@@ -196,21 +198,21 @@ Adaptive hedging dynamically adjusts the delay before starting a speculative hed
 A naive adaptive hedging implementation might only measure the latency of *unhedged* requests (requests that complete before the hedging threshold). However, during a global backend slowdown, this suffers from **survival bias**: the client only measures the few requests that happened to complete quickly. The tracker would falsely conclude the backend is fast, lower the hedging delay, and trigger a runaway loop where 100% of traffic is hedged, DDOSing the backend.
 
 To prevent this, the library implements **Retrospective Hedging**:
-*   It tracks the **best of multiple attempts** (the minimum latency between the primary and the hedged request) for each logical call: \(\min(\text{latency}_{\text{primary}}, \text{latency}_{\text{hedge}})\).
+*   It tracks the **best of multiple attempts** (the minimum latency between the primary and the hedged request) for each logical call: `min(latency_primary, latency_hedge)`.
 *   If the backend slows down globally, both attempts will be slow. The tracked latency increases, pushing the hedging delay up and reducing the rate of hedges.
 *   Combined with the **Token Bucket** (see below), this mathematically guarantees that the feedback loop is broken and the system remains stable.
 
 #### 2. Stochastic Percentile Tracking (Robbins-Monro Algorithm)
-To avoid the CPU and memory overhead of storing a rolling window of hundreds of latency samples, the library uses a **stochastic approximation algorithm** (Robbins-Monro) to track the target percentile (e.g., P95) in \(O(1)\) space and time:
-*   On every request, the current raw estimate \(V\) is updated based on whether the request's best latency was "slow" (exceeded \(V\)) or "fast" (was below \(V\)).
-*   If slow, the estimate is increased: \(V_{\text{new}} = V_{\text{old}} \times (1 + \frac{P}{R})\)
-*   If fast, the estimate is decreased: \(V_{\text{new}} = V_{\text{old}} \times (1 - \frac{1 - P}{R})\)
-*   Where \(P\) is the target `dynamicPercentile` (e.g., `0.95`) and \(R\) is the `adaptationRate` (e.g., `10.0`). At the target percentile, the expected change is zero, causing the estimate to track the true percentile.
+To avoid the CPU and memory overhead of storing a rolling window of hundreds of latency samples, the library uses a **stochastic approximation algorithm** (Robbins-Monro) to track the target percentile (e.g., P95) in `O(1)` space and time:
+*   On every request, the current raw estimate `V` is updated based on whether the request's best latency was "slow" (exceeded `V`) or "fast" (was below `V`).
+*   If slow, the estimate is increased: `V_new = V_old × (1 + P / R)`
+*   If fast, the estimate is decreased: `V_new = V_old × (1 - (1 - P) / R)`
+*   Where `P` is the target `dynamicPercentile` (e.g., `0.95`) and `R` is the `adaptationRate` (e.g., `10.0`). At the target percentile, the expected change is zero, causing the estimate to track the true percentile.
 
 #### 3. Early Registration
 During a sudden backend outage, waiting for requests to timeout or finish before updating the tracker would cause a slow reaction time.
-*   To solve this, the library starts an **Early Registration Timer** set to the raw percentile estimate \(V\) when a request begins.
-*   If the primary request exceeds \(V\), it is immediately registered as a "slow" sample, adjusting the tracker upward *before* the request even completes or is hedged.
+*   To solve this, the library starts an **Early Registration Timer** set to the raw percentile estimate `V` when a request begins.
+*   If the primary request exceeds `V`, it is immediately registered as a "slow" sample, adjusting the tracker upward *before* the request even completes or is hedged.
 *   Only one sample is registered per logical request (subsequent completions of the primary or hedge are ignored by the tracker).
 
 #### 4. Overload Protection
