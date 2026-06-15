@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:test/test.dart';
 import 'package:circuit_breaker/circuit_breaker.dart';
-import 'package:circuit_breaker/src/context.dart';
 
 void main() {
   group('ResilienceContext Improvements', () {

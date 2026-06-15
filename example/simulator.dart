@@ -59,6 +59,8 @@ final class StatsTracker {
   // Cumulative stats since startup
   final Map<Criticality, Stats> _cumulativeStats = {
     Criticality.criticalPlus: Stats(),
+    Criticality.critical: Stats(),
+    Criticality.sheddablePlus: Stats(),
     Criticality.sheddable: Stats(),
   };
 
@@ -181,8 +183,28 @@ Future<void> waitWithCancellation(
   await completer.future;
 }
 
+double _nextGaussian() {
+  final random = Random();
+  double u1 = 0;
+  double u2 = 0;
+  while (u1 == 0) {
+    u1 = random.nextDouble();
+  }
+  u2 = random.nextDouble();
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * pi * u2);
+}
+
+double _nextGaussianLatency(double mean) {
+  final stdDev = mean * 0.2;
+  final z0 = _nextGaussian();
+  return max(0.0, mean + z0 * stdDev);
+}
+
 Future<String> mockBackend(Completer<void> cancelSignal) async {
-  await waitWithCancellation(state.latency, cancelSignal);
+  final mean = state.latency.inMilliseconds.toDouble();
+  final latencyMs = _nextGaussianLatency(mean);
+  final actualLatency = Duration(milliseconds: latencyMs.round());
+  await waitWithCancellation(actualLatency, cancelSignal);
 
   if (cancelSignal.isCompleted) {
     throw Exception('Cancelled');
@@ -419,31 +441,33 @@ void handleKey(String key) {
   }
 }
 
+double calculateRejectionProbability(List<RequestRecord>? history, double k) {
+  if (history == null || history.isEmpty) return 0.0;
+  final requests = history.length;
+  final accepts = history.where((r) => r.accepted).length;
+  return max(0.0, (requests - k * accepts) / (requests + 1));
+}
+
 void drawUI() {
-  final critRolling = statsTracker.getRollingStats(Criticality.criticalPlus);
-  final shedRolling = statsTracker.getRollingStats(Criticality.sheddable);
-  final critCumulative = statsTracker.getCumulativeStats(
+  final critPlusRolling = statsTracker.getRollingStats(
     Criticality.criticalPlus,
+  );
+  final critRolling = statsTracker.getRollingStats(Criticality.critical);
+  final shedPlusRolling = statsTracker.getRollingStats(
+    Criticality.sheddablePlus,
+  );
+  final shedRolling = statsTracker.getRollingStats(Criticality.sheddable);
+
+  final critPlusCumulative = statsTracker.getCumulativeStats(
+    Criticality.criticalPlus,
+  );
+  final critCumulative = statsTracker.getCumulativeStats(Criticality.critical);
+  final shedPlusCumulative = statsTracker.getCumulativeStats(
+    Criticality.sheddablePlus,
   );
   final shedCumulative = statsTracker.getCumulativeStats(Criticality.sheddable);
 
   final resState = context.states['api-service'];
-  String cbStateStr = 'UNKNOWN';
-  String cbColor = '\x1B[0m'; // Reset
-
-  if (resState != null) {
-    switch (resState.circuitState) {
-      case CircuitState.closed:
-        cbStateStr = 'CLOSED';
-        cbColor = '\x1B[32m'; // Green
-      case CircuitState.open:
-        cbStateStr = 'OPEN';
-        cbColor = '\x1B[31m'; // Red
-      case CircuitState.halfOpen:
-        cbStateStr = 'HALF-OPEN';
-        cbColor = '\x1B[33m'; // Yellow
-    }
-  }
 
   // Save cursor
   stdout.write('\x1B[s');
@@ -451,6 +475,16 @@ void drawUI() {
   stdout.write('\x1B[0;0H');
 
   final buf = StringBuffer();
+
+  String formatRow(String label, String c1, String c2, String c3, String c4) {
+    final row =
+        '${label.padRight(18)}${c1.padRight(15)}${c2.padRight(15)}${c3.padRight(15)}${c4.padRight(15)}';
+    if (row.length > 80) {
+      return row.substring(0, 80);
+    }
+    return row;
+  }
+
   buf.writeln(
     '================================================================================\x1B[K',
   );
@@ -460,99 +494,282 @@ void drawUI() {
   buf.writeln(
     '================================================================================\x1B[K',
   );
+
+  // 1. TRAFFIC METRICS (cumulative)
   buf.writeln(
-    'Resource: api-service | CB State: $cbColor$cbStateStr\x1B[0m (Fail Count: ${resState?.failureCount ?? 0})\x1B[K',
+    '--- TRAFFIC METRICS (cumulative & rolling rates) --------------------------------\x1B[K',
+  );
+  buf.writeln(
+    formatRow('Criticality:', 'critPlus', 'critical', 'shedPlus', 'sheddable') +
+        '\x1B[K',
   );
   buf.writeln(
     '--------------------------------------------------------------------------------\x1B[K',
   );
-  buf.writeln(
-    'Stats:                 Critical (criticalPlus)    Sheddable (sheddable)         \x1B[K',
-  );
-  buf.writeln(
-    '--------------------------------------------------------------------------------\x1B[K',
-  );
 
-  final critTotalStr = '${critCumulative.total} (since start)';
-  final shedTotalStr = '${shedCumulative.total} (since start)';
-  buf.writeln(
-    'Total Requests:        ${critTotalStr.padRight(26)}${shedTotalStr}\x1B[K',
-  );
+  String formatMetricValue(int rollingVal, int cumulativeVal) {
+    final rateStr = (rollingVal / 5.0).toStringAsFixed(1);
+    return '$rateStr/s ($cumulativeVal)';
+  }
 
-  final critSuccessStr =
-      '${(critRolling.success / 5.0).toStringAsFixed(1)}/s (${critCumulative.success})';
-  final shedSuccessStr =
-      '${(shedRolling.success / 5.0).toStringAsFixed(1)}/s (${shedCumulative.success})';
   buf.writeln(
-    'Success Rate:          ${critSuccessStr.padRight(26)}${shedSuccessStr}\x1B[K',
-  );
-
-  final critFailStr =
-      '${(critRolling.failure / 5.0).toStringAsFixed(1)}/s (${critCumulative.failure})';
-  final shedFailStr =
-      '${(shedRolling.failure / 5.0).toStringAsFixed(1)}/s (${shedCumulative.failure})';
-  buf.writeln(
-    'Failure Rate:          ${critFailStr.padRight(26)}${shedFailStr}\x1B[K',
-  );
-
-  final critTimeoutStr =
-      '${(critRolling.timeout / 5.0).toStringAsFixed(1)}/s (${critCumulative.timeout})';
-  final shedTimeoutStr =
-      '${(shedRolling.timeout / 5.0).toStringAsFixed(1)}/s (${shedCumulative.timeout})';
-  buf.writeln(
-    'Timeout Rate:          ${critTimeoutStr.padRight(26)}${shedTimeoutStr}\x1B[K',
-  );
-
-  final critThrottledStr =
-      '${(critRolling.throttled / 5.0).toStringAsFixed(1)}/s (${critCumulative.throttled})';
-  final shedThrottledStr =
-      '${(shedRolling.throttled / 5.0).toStringAsFixed(1)}/s (${shedCumulative.throttled})';
-  buf.writeln(
-    'Throttled Rate:        ${critThrottledStr.padRight(26)}${shedThrottledStr}\x1B[K',
-  );
-
-  final critBlockedStr =
-      '${(critRolling.blockedCB / 5.0).toStringAsFixed(1)}/s (${critCumulative.blockedCB})';
-  final shedBlockedStr =
-      '${(shedRolling.blockedCB / 5.0).toStringAsFixed(1)}/s (${shedCumulative.blockedCB})';
-  buf.writeln(
-    'CB-Blocked Rate:       ${critBlockedStr.padRight(26)}${shedBlockedStr}\x1B[K',
-  );
-
-  final critHedgesStr =
-      '${(critRolling.hedges / 5.0).toStringAsFixed(1)}/s (${critCumulative.hedges})';
-  final shedHedgesStr =
-      '${(shedRolling.hedges / 5.0).toStringAsFixed(1)}/s (${shedCumulative.hedges})';
-  buf.writeln(
-    'Hedges Triggered:      ${critHedgesStr.padRight(26)}${shedHedgesStr}\x1B[K',
-  );
-
-  final critRetriesStr =
-      '${(critRolling.retries / 5.0).toStringAsFixed(1)}/s (${critCumulative.retries})';
-  final shedRetriesStr =
-      '${(shedRolling.retries / 5.0).toStringAsFixed(1)}/s (${shedCumulative.retries})';
-  buf.writeln(
-    'Retries Triggered:     ${critRetriesStr.padRight(26)}${shedRetriesStr}\x1B[K',
+    formatRow(
+          'Requests:',
+          formatMetricValue(critPlusRolling.total, critPlusCumulative.total),
+          formatMetricValue(critRolling.total, critCumulative.total),
+          formatMetricValue(shedPlusRolling.total, shedPlusCumulative.total),
+          formatMetricValue(shedRolling.total, shedCumulative.total),
+        ) +
+        '\x1B[K',
   );
 
   buf.writeln(
-    '--------------------------------------------------------------------------------\x1B[K',
+    formatRow(
+          'Success:',
+          formatMetricValue(
+            critPlusRolling.success,
+            critPlusCumulative.success,
+          ),
+          formatMetricValue(critRolling.success, critCumulative.success),
+          formatMetricValue(
+            shedPlusRolling.success,
+            shedPlusCumulative.success,
+          ),
+          formatMetricValue(shedRolling.success, shedCumulative.success),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Failure:',
+          formatMetricValue(
+            critPlusRolling.failure,
+            critPlusCumulative.failure,
+          ),
+          formatMetricValue(critRolling.failure, critCumulative.failure),
+          formatMetricValue(
+            shedPlusRolling.failure,
+            shedPlusCumulative.failure,
+          ),
+          formatMetricValue(shedRolling.failure, shedCumulative.failure),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Timeout:',
+          formatMetricValue(
+            critPlusRolling.timeout,
+            critPlusCumulative.timeout,
+          ),
+          formatMetricValue(critRolling.timeout, critCumulative.timeout),
+          formatMetricValue(
+            shedPlusRolling.timeout,
+            shedPlusCumulative.timeout,
+          ),
+          formatMetricValue(shedRolling.timeout, shedCumulative.timeout),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Throttled:',
+          formatMetricValue(
+            critPlusRolling.throttled,
+            critPlusCumulative.throttled,
+          ),
+          formatMetricValue(critRolling.throttled, critCumulative.throttled),
+          formatMetricValue(
+            shedPlusRolling.throttled,
+            shedPlusCumulative.throttled,
+          ),
+          formatMetricValue(shedRolling.throttled, shedCumulative.throttled),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Blocked (CB):',
+          formatMetricValue(
+            critPlusRolling.blockedCB,
+            critPlusCumulative.blockedCB,
+          ),
+          formatMetricValue(critRolling.blockedCB, critCumulative.blockedCB),
+          formatMetricValue(
+            shedPlusRolling.blockedCB,
+            shedPlusCumulative.blockedCB,
+          ),
+          formatMetricValue(shedRolling.blockedCB, shedCumulative.blockedCB),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Hedges:',
+          formatMetricValue(critPlusRolling.hedges, critPlusCumulative.hedges),
+          formatMetricValue(critRolling.hedges, critCumulative.hedges),
+          formatMetricValue(shedPlusRolling.hedges, shedPlusCumulative.hedges),
+          formatMetricValue(shedRolling.hedges, shedCumulative.hedges),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Retries:',
+          formatMetricValue(
+            critPlusRolling.retries,
+            critPlusCumulative.retries,
+          ),
+          formatMetricValue(critRolling.retries, critCumulative.retries),
+          formatMetricValue(
+            shedPlusRolling.retries,
+            shedPlusCumulative.retries,
+          ),
+          formatMetricValue(shedRolling.retries, shedCumulative.retries),
+        ) +
+        '\x1B[K',
+  );
+
+  // 2. THROTTLING STATES (last 10s)
+  buf.writeln(
+    '--- THROTTLING STATES (last 10s) -----------------------------------------------\x1B[K',
+  );
+
+  String winReqStr(Criticality c) {
+    if (resState == null) return '0';
+    return '${resState.requestHistory[c]?.length ?? 0}';
+  }
+
+  String winAccStr(Criticality c) {
+    if (resState == null) return '0';
+    return '${resState.requestHistory[c]?.where((r) => r.accepted).length ?? 0}';
+  }
+
+  String rejProbStr(Criticality c) {
+    if (resState == null) return '0.0%';
+    final history = resState.requestHistory[c];
+    final k = resState.config.throttling.k;
+    final p = calculateRejectionProbability(history, k);
+    return '${(p * 100).toStringAsFixed(1)}%';
+  }
+
+  buf.writeln(
+    formatRow(
+          'Window Requests:',
+          winReqStr(Criticality.criticalPlus),
+          winReqStr(Criticality.critical),
+          winReqStr(Criticality.sheddablePlus),
+          winReqStr(Criticality.sheddable),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Window Accepts:',
+          winAccStr(Criticality.criticalPlus),
+          winAccStr(Criticality.critical),
+          winAccStr(Criticality.sheddablePlus),
+          winAccStr(Criticality.sheddable),
+        ) +
+        '\x1B[K',
+  );
+
+  buf.writeln(
+    formatRow(
+          'Rejection Prob:',
+          rejProbStr(Criticality.criticalPlus),
+          rejProbStr(Criticality.critical),
+          rejProbStr(Criticality.sheddablePlus),
+          rejProbStr(Criticality.sheddable),
+        ) +
+        '\x1B[K',
+  );
+
+  // 3. SHARED MECHANISM STATES
+  buf.writeln(
+    '--- SHARED MECHANISM STATES ----------------------------------------------------\x1B[K',
+  );
+
+  String cbStateLine = 'Circuit Breaker:   ';
+  if (resState != null) {
+    String cbStateStr = 'UNKNOWN';
+    String cbColor = '\x1B[0m';
+    switch (resState.circuitState) {
+      case CircuitState.closed:
+        cbStateStr = 'CLOSED';
+        cbColor = '\x1B[32m';
+      case CircuitState.open:
+        cbStateStr = 'OPEN';
+        cbColor = '\x1B[31m';
+      case CircuitState.halfOpen:
+        cbStateStr = 'HALF-OPEN';
+        cbColor = '\x1B[33m';
+    }
+
+    cbStateLine += '$cbColor$cbStateStr\x1B[0m';
+
+    if (resState.circuitState == CircuitState.open) {
+      final now = DateTime.now();
+      final elapsed = now.difference(resState.lastStateChange);
+      final remaining = resState.config.circuitBreaker.resetTimeout - elapsed;
+      final remainingSecs = max(0.0, remaining.inMilliseconds / 1000.0);
+      cbStateLine += ' (recovers in ${remainingSecs.toStringAsFixed(1)}s)';
+    }
+
+    cbStateLine +=
+        ' | Failures: ${resState.failureCount} / ${resState.config.circuitBreaker.consecutiveFailuresThreshold}';
+  } else {
+    cbStateLine += 'N/A';
+  }
+  buf.writeln(cbStateLine + '\x1B[K');
+
+  String retryBudgetLine = 'Retry Budget:      ';
+  if (resState != null) {
+    final budgetRequests = resState.retryHistory.length;
+    final budgetRetries = resState.retryHistory.where((r) => r.isRetry).length;
+    final ratio = budgetRequests > 0 ? (budgetRetries / budgetRequests) : 0.0;
+    final limit = resState.config.retry.retryBudgetRatio;
+
+    retryBudgetLine +=
+        'Requests: $budgetRequests | Retries: $budgetRetries | Ratio: ${(ratio * 100).toStringAsFixed(1)}% / ${(limit * 100).toStringAsFixed(1)}%';
+  } else {
+    retryBudgetLine += 'N/A';
+  }
+  buf.writeln(retryBudgetLine + '\x1B[K');
+
+  // 4. CONFIGURATIONS
+  buf.writeln(
+    '--- CONFIGURATIONS -------------------------------------------------------------\x1B[K',
   );
   final breakdownStatus = state.isBreakdownActive
       ? ' \x1B[31m[BREAKDOWN ACTIVE]\x1B[0m'
       : '';
   buf.writeln(
-    'Backend Config:        [l/L] Latency: ${state.latency.inMilliseconds}ms | [f/F] Failure Rate: ${(state.failureRate * 100).toStringAsFixed(0)}% [b] Breakdown$breakdownStatus\x1B[K',
+    'Backend:  [l/L] Latency: ${state.latency.inMilliseconds}ms | [f/F] Fail Rate: ${(state.failureRate * 100).toStringAsFixed(0)}%$breakdownStatus\x1B[K',
+  );
+  buf.writeln('          [b] Trigger Breakdown\x1B[K');
+
+  buf.writeln(
+    'Resilience: [c/C] CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
   );
   buf.writeln(
-    'Resilience Config:     [c/C] CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
+    '            [k/K] Throttling K: ${state.throttlingK.toStringAsFixed(1)}\x1B[K',
   );
   buf.writeln(
-    '                       [k/K] Throttling K: ${state.throttlingK.toStringAsFixed(1)}\x1B[K',
+    '            [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle)\x1B[K',
   );
   buf.writeln(
-    '                       [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
+    '            [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
   );
+
+  // 5. STATUS & CONTROLS
   buf.writeln(
     '================================================================================\x1B[K',
   );
@@ -623,6 +840,8 @@ void main() async {
       state.configChanged = false;
     }
     executeRequest(resource, Criticality.criticalPlus);
+    executeRequest(resource, Criticality.critical);
+    executeRequest(resource, Criticality.sheddablePlus);
     executeRequest(resource, Criticality.sheddable);
   });
 

@@ -30,7 +30,9 @@ export 'src/context.dart'
         ThrottlingConfig,
         HedgingConfig,
         CircuitState,
-        ResourceState;
+        ResourceState,
+        RequestRecord,
+        RetryAttemptRecord;
 
 export 'src/throttling.dart' show ThrottledException;
 export 'src/exceptions.dart'

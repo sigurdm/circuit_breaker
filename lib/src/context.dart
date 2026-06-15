@@ -489,7 +489,16 @@ class ResourceState {
   // Circuit Breaker State
   int failureCount = 0;
   DateTime? lastFailureTime;
-  CircuitState circuitState = CircuitState.closed;
+  CircuitState _circuitState = CircuitState.closed;
+  DateTime lastStateChange = DateTime.now();
+
+  CircuitState get circuitState => _circuitState;
+  set circuitState(CircuitState newState) {
+    if (_circuitState != newState) {
+      _circuitState = newState;
+      lastStateChange = DateTime.now();
+    }
+  }
 
   // Throttling State (isolated per criticality)
   final Map<Criticality, List<RequestRecord>> requestHistory = {
