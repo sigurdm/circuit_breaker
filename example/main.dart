@@ -40,17 +40,17 @@ void main() async {
     'my-service',
     config: ResourceConfig(
       // 1. Circuit Breaker: Trip after 3 consecutive failures, retry after 2 seconds
-      circuitBreaker: const CircuitBreakerConfig(
+      circuitBreaker: CircuitBreakerConfig(
         consecutiveFailuresThreshold: 3,
         resetTimeout: Duration(seconds: 2),
       ),
       // 2. Adaptive Throttling: Aggressive K=1.5 to show throttling quickly
-      throttling: const ThrottlingConfig(
+      throttling: ThrottlingConfig(
         k: 1.5,
         windowDuration: Duration(seconds: 5),
       ),
       // 3. Retries: Up to 3 attempts with exponential backoff
-      retry: const RetryConfig(
+      retry: RetryConfig(
         maxAttempts: 3,
         baseDelay: Duration(milliseconds: 50),
       ),
@@ -81,7 +81,7 @@ void main() async {
     'recommendations',
     myService,
     criticality: Criticality.sheddable, // Low priority
-    retryOverride: const RetryConfig(
+    retryOverride: RetryConfig(
       maxAttempts: 1,
     ), // Don't retry low priority
   );

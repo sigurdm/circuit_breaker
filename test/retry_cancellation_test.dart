@@ -7,7 +7,7 @@ void main() {
     final context = ResilienceContext();
     final resource = Resource(
       "test-service",
-      config: const ResourceConfig(
+      config: ResourceConfig(
         timeout: Duration(milliseconds: 50),
         retry: RetryConfig(
           maxAttempts: 5,

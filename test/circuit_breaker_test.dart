@@ -9,7 +9,7 @@ void main() {
     late CircuitBreaker cb;
 
     setUp(() {
-      config = const ResourceConfig(
+      config = ResourceConfig(
         circuitBreaker: CircuitBreakerConfig(
           consecutiveFailuresThreshold: 2,
           resetTimeout: Duration(milliseconds: 100),

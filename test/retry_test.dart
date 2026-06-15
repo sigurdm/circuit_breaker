@@ -8,7 +8,7 @@ void main() {
     late ResourceState state;
 
     setUp(() {
-      config = const ResourceConfig(
+      config = ResourceConfig(
         retry: RetryConfig(
           maxAttempts: 3,
           baseDelay: Duration(milliseconds: 10),

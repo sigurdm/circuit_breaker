@@ -18,7 +18,7 @@ void main() {
         () async {
           resource = Resource(
             'timeout-service',
-            config: const ResourceConfig(
+            config: ResourceConfig(
               circuitBreaker: CircuitBreakerConfig(
                 consecutiveFailuresThreshold: 2,
               ),
@@ -84,10 +84,10 @@ void main() {
         resource = Resource(
           'classifier-service',
           config: ResourceConfig(
-            circuitBreaker: const CircuitBreakerConfig(
+            circuitBreaker: CircuitBreakerConfig(
               consecutiveFailuresThreshold: 2,
             ),
-            throttling: const ThrottlingConfig(
+            throttling: ThrottlingConfig(
               k: 100.0,
             ), // Prevent throttling from interfering
             failureClassifier: (e) =>
@@ -113,10 +113,10 @@ void main() {
         resource = Resource(
           'classifier-service-2',
           config: ResourceConfig(
-            circuitBreaker: const CircuitBreakerConfig(
+            circuitBreaker: CircuitBreakerConfig(
               consecutiveFailuresThreshold: 2,
             ),
-            throttling: const ThrottlingConfig(
+            throttling: ThrottlingConfig(
               k: 100.0,
             ), // Prevent throttling from interfering
             failureClassifier: (e) => e is! ArgumentError,
@@ -149,7 +149,7 @@ void main() {
       test('cleans up old attempts and enforces budget only on recent ones', () async {
         resource = Resource(
           'budget-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             retry: RetryConfig(
               maxAttempts: 3,
               minRequestsForBudget: 5,
@@ -220,7 +220,7 @@ void main() {
       test('records internal retries in throttling history', () async {
         resource = Resource(
           'throttling-retries-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             retry: RetryConfig(
               maxAttempts: 3,
               baseDelay: Duration(milliseconds: 1),
@@ -279,7 +279,7 @@ void main() {
       test('throws ThrottledException when throttling kicks in', () async {
         resource = Resource(
           'throttling-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             throttling: ThrottlingConfig(
               k: 1.0, // Strict throttling
               windowDuration: Duration(seconds: 10),
@@ -289,7 +289,7 @@ void main() {
         op = Operation(
           'call',
           resource,
-          retryOverride: const RetryConfig(maxAttempts: 1),
+          retryOverride: RetryConfig(maxAttempts: 1),
         );
 
         // Cause 5 failures to trigger throttling (accepts = 0)
@@ -321,7 +321,7 @@ void main() {
       test('fails immediately if f1 fails before delay', () async {
         resource = Resource(
           'hedging-fail-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 100),
@@ -352,7 +352,7 @@ void main() {
       test('throws error if both hedges fail', () async {
         resource = Resource(
           'hedging-both-fail-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 10),
@@ -386,11 +386,11 @@ void main() {
       test('Circuit Breaker is checked before Adaptive Throttling', () async {
         resource = Resource(
           'cb-vs-throttling',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             circuitBreaker: CircuitBreakerConfig(
               consecutiveFailuresThreshold: 2,
             ),
-            throttling: ThrottlingConfig(k: -1.0), // Force throttling
+            throttling: ThrottlingConfig(k: 1.0),
           ),
         );
         op = Operation('call', resource);
@@ -400,9 +400,13 @@ void main() {
 
         final state = context.states[resource.name]!;
 
-        // Force Throttling to be active by adding a success request when k is -1.0
-        expect(state.requestHistory[op.criticality]!.length, 1);
-        expect(state.requestHistory[op.criticality]![0].accepted, true);
+        // Force Throttling to be active by adding many failures
+        for (int i = 0; i < 10000; i++) {
+          state.requestHistory[op.criticality]!.add(
+            RequestRecord(DateTime.now(), false),
+          );
+        }
+        expect(state.requestHistory[op.criticality]!.length, 10001);
 
         // Trip the Circuit Breaker manually
         state.circuitState = CircuitState.open;
@@ -420,12 +424,12 @@ void main() {
         () async {
           resource = Resource(
             'half-open-bypass',
-            config: const ResourceConfig(
+            config: ResourceConfig(
               circuitBreaker: CircuitBreakerConfig(
                 consecutiveFailuresThreshold: 2,
                 resetTimeout: Duration(milliseconds: 50),
               ),
-              throttling: ThrottlingConfig(k: -1.0), // Force throttling
+              throttling: ThrottlingConfig(k: 1.0),
             ),
           );
           op = Operation('call', resource);
@@ -435,9 +439,13 @@ void main() {
 
           final state = context.states[resource.name]!;
 
-          // Force Throttling to be active
-          expect(state.requestHistory[op.criticality]!.length, 1);
-          expect(state.requestHistory[op.criticality]![0].accepted, true);
+          // Force Throttling to be active by adding many failures
+          for (int i = 0; i < 10000; i++) {
+            state.requestHistory[op.criticality]!.add(
+              RequestRecord(DateTime.now(), false),
+            );
+          }
+          expect(state.requestHistory[op.criticality]!.length, 10001);
 
           // Trip the Circuit Breaker manually
           state.circuitState = CircuitState.open;
@@ -456,9 +464,9 @@ void main() {
       test('Adaptive Throttling is checked before Retry', () async {
         resource = Resource(
           'throttling-vs-retry',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             retry: RetryConfig(maxAttempts: 3),
-            throttling: ThrottlingConfig(k: -1.0), // Force throttling
+            throttling: ThrottlingConfig(k: 1.0),
           ),
         );
         op = Operation('call', resource);
@@ -468,9 +476,13 @@ void main() {
 
         final state = context.states[resource.name]!;
 
-        // Force Throttling to be active
-        expect(state.requestHistory[op.criticality]!.length, 1);
-        expect(state.requestHistory[op.criticality]![0].accepted, true);
+        // Force Throttling to be active by adding many failures
+        for (int i = 0; i < 10000; i++) {
+          state.requestHistory[op.criticality]!.add(
+            RequestRecord(DateTime.now(), false),
+          );
+        }
+        expect(state.requestHistory[op.criticality]!.length, 10001);
 
         int actionCalls = 0;
         state.retryHistory.clear();
@@ -495,7 +507,7 @@ void main() {
       test('Retry wraps Hedging (entire hedging session is retried)', () async {
         resource = Resource(
           'retry-vs-hedging',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             retry: RetryConfig(
               maxAttempts: 2,
               baseDelay: Duration(milliseconds: 100),
@@ -555,7 +567,7 @@ void main() {
       test(
         'ResourceState.config is updated dynamically in _getState',
         () async {
-          final initialConfig = const ResourceConfig(
+          final initialConfig = ResourceConfig(
             throttling: ThrottlingConfig(windowDuration: Duration(seconds: 1)),
           );
           final initialResource = Resource(
@@ -576,7 +588,7 @@ void main() {
           );
 
           // Now use a new Resource object with different config
-          final newConfig = const ResourceConfig(
+          final newConfig = ResourceConfig(
             throttling: ThrottlingConfig(windowDuration: Duration(seconds: 5)),
           );
           final newResource = Resource(
@@ -600,7 +612,7 @@ void main() {
       test('cancellation does not trigger subsequent retries', () async {
         final resource = Resource(
           'cancel-retry-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             retry: RetryConfig(
               maxAttempts: 3,
               baseDelay: Duration(milliseconds: 10),
@@ -639,7 +651,7 @@ void main() {
       test('retryOn filter is respected by ResilienceContext', () async {
         resource = Resource(
           'retry-on-filter-service',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             retry: RetryConfig(
               maxAttempts: 3,
               baseDelay: Duration(milliseconds: 10),
@@ -672,7 +684,7 @@ void main() {
       late ResourceState state;
 
       setUp(() {
-        final config = const ResourceConfig(
+        final config = ResourceConfig(
           throttling: ThrottlingConfig(
             k: 2.0,
             windowDuration: Duration(seconds: 1),

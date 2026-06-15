@@ -9,7 +9,7 @@ void main() {
     late AdaptiveThrottler throttler;
 
     setUp(() {
-      config = const ResourceConfig(
+      config = ResourceConfig(
         throttling: ThrottlingConfig(
           k: 2.0,
           windowDuration: Duration(minutes: 2),
@@ -114,7 +114,7 @@ void main() {
   });
   group('Criticality-Aware Throttling Config', () {
     test('default constructor applies formula with spread: 1.0', () {
-      const config = ThrottlingConfig(k: 2.0, spread: 1.0);
+      final config = ThrottlingConfig(k: 2.0, spread: 1.0);
       expect(
         config.k.criticalPlus,
         closeTo(2.0 * (1.0 + 3.0 * 1.0), 0.001),
@@ -131,7 +131,7 @@ void main() {
     });
 
     test('default constructor applies formula with spread: 0.0', () {
-      const config = ThrottlingConfig(k: 2.0, spread: 0.0);
+      final config = ThrottlingConfig(k: 2.0, spread: 0.0);
       expect(config.k.criticalPlus, closeTo(2.0, 0.001));
       expect(config.k.critical, closeTo(2.0, 0.001));
       expect(config.k.sheddablePlus, closeTo(2.0, 0.001));
@@ -139,7 +139,7 @@ void main() {
     });
 
     test('default constructor applies formula with spread: 0.5', () {
-      const config = ThrottlingConfig(k: 2.0, spread: 0.5);
+      final config = ThrottlingConfig(k: 2.0, spread: 0.5);
       expect(
         config.k.criticalPlus,
         closeTo(2.0 * (1.0 + 3.0 * 0.5), 0.001),
@@ -156,7 +156,7 @@ void main() {
     });
 
     test('default constructor enforces minimum K of 1.1', () {
-      const config = ThrottlingConfig(k: 1.5, spread: 1.0);
+      final config = ThrottlingConfig(k: 1.5, spread: 1.0);
       expect(config.k.sheddablePlus, closeTo(1.2, 0.001));
       expect(config.k.sheddable, closeTo(1.1, 0.001));
     });
@@ -168,7 +168,7 @@ void main() {
         sheddablePlus: 2.0,
         sheddable: 1.5,
       );
-      const config = ThrottlingConfig.withCriticality(k: exactK);
+      final config = ThrottlingConfig.withCriticality(k: exactK);
       expect(config.k.criticalPlus, 5.0);
       expect(config.k.critical, 3.0);
       expect(config.k.sheddablePlus, 2.0);
@@ -182,7 +182,7 @@ void main() {
         sheddablePlus: 2.0,
         sheddable: 1.5,
       );
-      const config = ThrottlingConfig.withCriticality(k: exactK);
+      final config = ThrottlingConfig.withCriticality(k: exactK);
       expect(config.getK(Criticality.criticalPlus), 5.0);
       expect(config.getK(Criticality.critical), 3.0);
       expect(config.getK(Criticality.sheddablePlus), 2.0);
@@ -196,7 +196,7 @@ void main() {
     late AdaptiveThrottler throttler;
 
     setUp(() {
-      config = const ResourceConfig(
+      config = ResourceConfig(
         throttling: ThrottlingConfig(
           k: 2.0,
           spread: 1.0,

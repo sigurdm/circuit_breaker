@@ -17,7 +17,7 @@ void main() {
       () async {
         resource = Resource(
           'static-hedging',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 50),
@@ -55,7 +55,7 @@ void main() {
       () async {
         resource = Resource(
           'dynamic-adaptation-slow',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 50), // Initial V
@@ -98,7 +98,7 @@ void main() {
       () async {
         resource = Resource(
           'dynamic-adaptation-fast',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 50), // Initial V
@@ -133,7 +133,7 @@ void main() {
     test('token bucket limits the rate of hedges', () async {
       resource = Resource(
         'token-bucket-limit',
-        config: const ResourceConfig(
+        config: ResourceConfig(
           hedging: HedgingConfig(
             enabled: true,
             delay: Duration(milliseconds: 10), // Small delay to hedge easily
@@ -174,7 +174,7 @@ void main() {
     test('concurrency limit prevents too many concurrent hedges', () async {
       resource = Resource(
         'concurrency-limit',
-        config: const ResourceConfig(
+        config: ResourceConfig(
           hedging: HedgingConfig(
             enabled: true,
             delay: Duration(milliseconds: 10),
@@ -287,7 +287,7 @@ void main() {
       () async {
         resource = Resource(
           'single-sample-early',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 50), // rawV
@@ -333,7 +333,7 @@ void main() {
       () async {
         resource = Resource(
           'early-reg-timing',
-          config: const ResourceConfig(
+          config: ResourceConfig(
             hedging: HedgingConfig(
               enabled: true,
               delay: Duration(milliseconds: 50), // rawV

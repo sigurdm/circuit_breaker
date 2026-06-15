@@ -9,7 +9,7 @@ void main() {
     late ResourceState state;
 
     setUp(() {
-      config = const ResourceConfig(
+      config = ResourceConfig(
         hedging: HedgingConfig(
           enabled: true,
           delay: Duration(milliseconds: 50),
@@ -19,7 +19,7 @@ void main() {
     });
 
     test('executes normally when hedging disabled', () async {
-      final disabledConfig = const ResourceConfig(
+      final disabledConfig = ResourceConfig(
         hedging: HedgingConfig(enabled: false),
       );
 

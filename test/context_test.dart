@@ -11,7 +11,7 @@ void main() {
 
     setUp(() {
       context = ResilienceContext();
-      resource = const Resource(
+      resource = Resource(
         'my-service',
         config: ResourceConfig(
           circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 2),
@@ -23,7 +23,7 @@ void main() {
       readOp = Operation(
         'read',
         resource,
-        hedgingOverride: const HedgingConfig(
+        hedgingOverride: HedgingConfig(
           enabled: true,
           delay: Duration(milliseconds: 10),
         ),

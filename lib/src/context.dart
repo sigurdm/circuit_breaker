@@ -53,17 +53,26 @@ final class ResourceConfig {
   /// Creates a new [ResourceConfig] with the specified policies.
   ///
   /// Defaults are used for any omitted configuration.
-  const ResourceConfig({
-    this.circuitBreaker = const CircuitBreakerConfig(),
-    this.retry = const RetryConfig(),
-    this.throttling = const ThrottlingConfig(),
-    this.hedging = const HedgingConfig(),
+  ///
+  /// Throws [ArgumentError] if [timeout] is non-null and not positive.
+  ResourceConfig({
+    CircuitBreakerConfig? circuitBreaker,
+    RetryConfig? retry,
+    ThrottlingConfig? throttling,
+    HedgingConfig? hedging,
     this.timeout,
     this.failureClassifier = _defaultFailureClassifier,
-  });
+  }) : circuitBreaker = circuitBreaker ?? CircuitBreakerConfig(),
+       retry = retry ?? RetryConfig(),
+       throttling = throttling ?? ThrottlingConfig(),
+       hedging = hedging ?? HedgingConfig() {
+    if (timeout != null && timeout! <= Duration.zero) {
+      throw ArgumentError.value(timeout, 'timeout', 'must be positive');
+    }
+  }
 
   /// Creates a default configuration.
-  factory ResourceConfig.defaultConfig() => const ResourceConfig();
+  factory ResourceConfig.defaultConfig() => ResourceConfig();
 }
 
 /// Represents a remote service or component.
@@ -77,7 +86,14 @@ final class Resource {
   final ResourceConfig config;
 
   /// Creates a [Resource].
-  const Resource(this.name, {this.config = const ResourceConfig()});
+  ///
+  /// Throws [ArgumentError] if [name] is empty.
+  Resource(this.name, {ResourceConfig? config})
+      : config = config ?? ResourceConfig() {
+    if (name.isEmpty) {
+      throw ArgumentError.value(name, 'name', 'must be non-empty');
+    }
+  }
 }
 
 /// The criticality of a request, as described in the Google SRE book.
@@ -118,13 +134,19 @@ final class Operation {
   final Criticality criticality;
 
   /// Creates an [Operation].
-  const Operation(
+  ///
+  /// Throws [ArgumentError] if [name] is empty.
+  Operation(
     this.name,
     this.resource, {
     this.hedgingOverride,
     this.retryOverride,
     this.criticality = Criticality.critical,
-  });
+  }) {
+    if (name.isEmpty) {
+      throw ArgumentError.value(name, 'name', 'must be non-empty');
+    }
+  }
 }
 
 /// Configuration for the Circuit Breaker pattern.
@@ -154,10 +176,28 @@ final class CircuitBreakerConfig {
   final Duration resetTimeout;
 
   /// Creates a [CircuitBreakerConfig].
-  const CircuitBreakerConfig({
+  ///
+  /// Throws [ArgumentError] if [consecutiveFailuresThreshold] is < 1,
+  /// or if [resetTimeout] is not positive.
+  CircuitBreakerConfig({
     this.consecutiveFailuresThreshold = 5,
     this.resetTimeout = const Duration(seconds: 30),
-  });
+  }) {
+    if (consecutiveFailuresThreshold < 1) {
+      throw ArgumentError.value(
+        consecutiveFailuresThreshold,
+        'consecutiveFailuresThreshold',
+        'must be >= 1',
+      );
+    }
+    if (resetTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        resetTimeout,
+        'resetTimeout',
+        'must be positive',
+      );
+    }
+  }
 }
 
 /// Configuration for the Retry pattern with Exponential Backoff and Jitter.
@@ -176,6 +216,7 @@ final class CircuitBreakerConfig {
 ///   maxAttempts: 3,
 ///   baseDelay: Duration(milliseconds: 100),
 ///   enableJitter: true,
+///   // ...
 /// );
 /// ```
 final class RetryConfig {
@@ -206,7 +247,16 @@ final class RetryConfig {
   final Duration budgetWindow;
 
   /// Creates a [RetryConfig].
-  const RetryConfig({
+  ///
+  /// Throws [ArgumentError] if:
+  /// - [maxAttempts] is < 1
+  /// - [baseDelay] is negative
+  /// - [maxDelay] is less than [baseDelay]
+  /// - [backoffFactor] is < 1.0
+  /// - [retryBudgetRatio] is not in [0.0, 1.0]
+  /// - [budgetWindow] is not positive
+  /// - [minRequestsForBudget] is negative
+  RetryConfig({
     this.maxAttempts = 3,
     this.baseDelay = const Duration(milliseconds: 100),
     this.maxDelay = const Duration(seconds: 10),
@@ -215,7 +265,29 @@ final class RetryConfig {
     this.minRequestsForBudget = 10,
     this.retryBudgetRatio = 0.1,
     this.budgetWindow = const Duration(minutes: 1),
-  });
+  }) {
+    if (maxAttempts < 1) {
+      throw ArgumentError.value(maxAttempts, 'maxAttempts', 'must be >= 1');
+    }
+    if (baseDelay < Duration.zero) {
+      throw ArgumentError.value(baseDelay, 'baseDelay', 'must be >= Duration.zero');
+    }
+    if (maxDelay < baseDelay) {
+      throw ArgumentError.value(maxDelay, 'maxDelay', 'must be >= baseDelay ($baseDelay)');
+    }
+    if (backoffFactor < 1.0) {
+      throw ArgumentError.value(backoffFactor, 'backoffFactor', 'must be >= 1.0');
+    }
+    if (retryBudgetRatio < 0.0 || retryBudgetRatio > 1.0) {
+      throw ArgumentError.value(retryBudgetRatio, 'retryBudgetRatio', 'must be in [0.0, 1.0]');
+    }
+    if (budgetWindow <= Duration.zero) {
+      throw ArgumentError.value(budgetWindow, 'budgetWindow', 'must be positive');
+    }
+    if (minRequestsForBudget < 0) {
+      throw ArgumentError.value(minRequestsForBudget, 'minRequestsForBudget', 'must be >= 0');
+    }
+  }
 }
 
 /// Configuration for Adaptive Throttling.
@@ -253,8 +325,9 @@ final class ThrottlingConfig {
   /// Creates a [ThrottlingConfig] with a base [k] and a [spread] factor.
   ///
   /// Preconditions:
-  /// - [k] is the base multiplier. Typically positive (greater than 1.0). Defaults to 2.0.
+  /// - [k] is the base multiplier. Must be >= 1.0. Defaults to 2.0.
   /// - [spread] must be non-negative (greater than or equal to 0.0). Defaults to 1.0.
+  /// - [windowDuration] must be positive.
   ///
   /// The effective K values for each criticality level are calculated as:
   /// - `criticalPlus`: `k * (1.0 + 3.0 * spread)`
@@ -262,13 +335,12 @@ final class ThrottlingConfig {
   /// - `sheddablePlus`: `k * (1.0 - 0.2 * spread)` (min 1.1)
   /// - `sheddable`: `k * (1.0 - 0.4 * spread)` (min 1.1)
   ///
-  /// Throws [AssertionError] in debug mode if [spread] is negative.
-  const ThrottlingConfig({
+  /// Throws [ArgumentError] if preconditions are violated.
+  ThrottlingConfig({
     double k = 2.0,
     double spread = 1.0,
     this.windowDuration = const Duration(minutes: 2),
-  }) : assert(spread >= 0.0, 'spread must be non-negative'),
-       k = (
+  }) : k = (
          criticalPlus: k * (1.0 + 3.0 * spread),
          critical: k,
          sheddablePlus: k * (1.0 - 0.2 * spread) < 1.1
@@ -277,13 +349,41 @@ final class ThrottlingConfig {
          sheddable: k * (1.0 - 0.4 * spread) < 1.1
              ? 1.1
              : k * (1.0 - 0.4 * spread),
-       );
+       ) {
+    if (k < 1.0) {
+      throw ArgumentError.value(k, 'k', 'must be >= 1.0');
+    }
+    if (spread < 0.0) {
+      throw ArgumentError.value(spread, 'spread', 'must be >= 0.0');
+    }
+    if (windowDuration <= Duration.zero) {
+      throw ArgumentError.value(windowDuration, 'windowDuration', 'must be positive');
+    }
+  }
 
   /// Creates a [ThrottlingConfig] with explicit K values for each criticality.
-  const ThrottlingConfig.withCriticality({
+  ///
+  /// Throws [ArgumentError] if any K value is < 1.0 or [windowDuration] is not positive.
+  ThrottlingConfig.withCriticality({
     required this.k,
     this.windowDuration = const Duration(minutes: 2),
-  });
+  }) {
+    if (k.criticalPlus < 1.0) {
+      throw ArgumentError.value(k.criticalPlus, 'k.criticalPlus', 'must be >= 1.0');
+    }
+    if (k.critical < 1.0) {
+      throw ArgumentError.value(k.critical, 'k.critical', 'must be >= 1.0');
+    }
+    if (k.sheddablePlus < 1.0) {
+      throw ArgumentError.value(k.sheddablePlus, 'k.sheddablePlus', 'must be >= 1.0');
+    }
+    if (k.sheddable < 1.0) {
+      throw ArgumentError.value(k.sheddable, 'k.sheddable', 'must be >= 1.0');
+    }
+    if (windowDuration <= Duration.zero) {
+      throw ArgumentError.value(windowDuration, 'windowDuration', 'must be positive');
+    }
+  }
 
   /// Returns the K value for the given [criticality].
   double getK(Criticality criticality) {
@@ -353,7 +453,17 @@ final class HedgingConfig {
   final int maxConcurrentHedges;
 
   /// Creates a [HedgingConfig].
-  const HedgingConfig({
+  ///
+  /// Throws [ArgumentError] if:
+  /// - [delay], [minDelay], or [maxDelay] is negative
+  /// - [minDelay] is greater than [maxDelay]
+  /// - [dynamicPercentile] is non-null and not in [0.0, 1.0]
+  /// - [delayMultiplier] is not positive
+  /// - [adaptationRate] is not positive
+  /// - [overloadPercentile] is not in [0.0, 1.0]
+  /// - [maxOverloadTokens] is < 0
+  /// - [maxConcurrentHedges] is < 0
+  HedgingConfig({
     this.delay = const Duration(milliseconds: 500),
     this.enabled = false,
     this.dynamicPercentile,
@@ -364,7 +474,38 @@ final class HedgingConfig {
     this.overloadPercentile = 0.95,
     this.maxOverloadTokens = 10.0,
     this.maxConcurrentHedges = 5,
-  });
+  }) {
+    if (delay < Duration.zero) {
+      throw ArgumentError.value(delay, 'delay', 'must be >= Duration.zero');
+    }
+    if (minDelay < Duration.zero) {
+      throw ArgumentError.value(minDelay, 'minDelay', 'must be >= Duration.zero');
+    }
+    if (maxDelay < Duration.zero) {
+      throw ArgumentError.value(maxDelay, 'maxDelay', 'must be >= Duration.zero');
+    }
+    if (minDelay > maxDelay) {
+      throw ArgumentError.value(minDelay, 'minDelay', 'must be <= maxDelay ($maxDelay)');
+    }
+    if (dynamicPercentile != null && (dynamicPercentile! < 0.0 || dynamicPercentile! > 1.0)) {
+      throw ArgumentError.value(dynamicPercentile, 'dynamicPercentile', 'must be in [0.0, 1.0]');
+    }
+    if (delayMultiplier <= 0.0) {
+      throw ArgumentError.value(delayMultiplier, 'delayMultiplier', 'must be positive');
+    }
+    if (adaptationRate <= 0.0) {
+      throw ArgumentError.value(adaptationRate, 'adaptationRate', 'must be positive');
+    }
+    if (overloadPercentile < 0.0 || overloadPercentile > 1.0) {
+      throw ArgumentError.value(overloadPercentile, 'overloadPercentile', 'must be in [0.0, 1.0]');
+    }
+    if (maxOverloadTokens < 0.0) {
+      throw ArgumentError.value(maxOverloadTokens, 'maxOverloadTokens', 'must be >= 0');
+    }
+    if (maxConcurrentHedges < 0) {
+      throw ArgumentError.value(maxConcurrentHedges, 'maxConcurrentHedges', 'must be >= 0');
+    }
+  }
 }
 
 /// Context that holds state for named resources and executes operations.
