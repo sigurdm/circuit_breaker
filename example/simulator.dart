@@ -24,8 +24,7 @@ final class SimulatorState {
   Duration overallTimeout = const Duration(milliseconds: 500);
   bool retryBudgetEnabled = true;
 
-  bool showHelp = false;
-  String lastStatusMessage = 'Simulator started. Press "?" for help.';
+  String lastStatusMessage = 'Simulator started.';
   bool configChanged = false;
 
   Timer? breakdownTimer;
@@ -477,11 +476,6 @@ void triggerBreakdown() {
 }
 
 void handleKey(String key) {
-  if (state.showHelp && key != '?') {
-    state.showHelp = false;
-    return;
-  }
-
   try {
     switch (key) {
       case 'f':
@@ -608,8 +602,6 @@ void handleKey(String key) {
         startScenario(Scenario.latencyBrownout);
       case 'v':
         startScenario(Scenario.oscillatingFailures);
-      case '?':
-        state.showHelp = !state.showHelp;
       case 'q':
         cleanup();
         exit(0);
@@ -917,37 +909,45 @@ void drawUI() {
   buf.writeln(
     '--- VISUAL TRENDS (last 20s) ---------------------------------------------------\x1B[K',
   );
+  final currentSuccessRate = state.successRateHistory.isNotEmpty
+      ? state.successRateHistory.last
+      : 1.0;
+  final currentSheddingProb = state.sheddingProbHistory.isNotEmpty
+      ? state.sheddingProbHistory.last
+      : 0.0;
+  final successRateStr = '${(currentSuccessRate * 100).toStringAsFixed(1)}%';
+  final sheddingProbStr = '${(currentSheddingProb * 100).toStringAsFixed(1)}%';
+
   buf.writeln(
-    'Success Rate:  [${renderSparkline(state.successRateHistory)}]\x1B[K',
+    'Success Rate:  ${successRateStr.padLeft(6)} [${renderSparkline(state.successRateHistory)}]\x1B[K',
   );
   buf.writeln(
-    'Shedding Prob: [${renderSparkline(state.sheddingProbHistory)}]\x1B[K',
+    'Shedding Prob: ${sheddingProbStr.padLeft(6)} [${renderSparkline(state.sheddingProbHistory)}]\x1B[K',
   );
 
-  // 5. CONFIGURATIONS
+  // 5. CONFIGURATIONS & HOTKEYS
   buf.writeln(
-    '--- CONFIGURATIONS -------------------------------------------------------------\x1B[K',
+    '--- CONFIGURATIONS & HOTKEYS ---------------------------------------------------\x1B[K',
   );
-  final breakdownStatus = state.isBreakdownActive
-      ? ' \x1B[31m[BREAKDOWN ACTIVE]\x1B[0m'
-      : '';
+  final breakdownOpt = state.isBreakdownActive
+      ? '\x1B[31m[b] Breakdown (5s)\x1B[0m'
+      : '[b] Breakdown (5s)';
   buf.writeln(
-    'Backend:  [l/L] Latency: ${state.latency.inMilliseconds}ms | [f/F] Fail Rate: ${(state.failureRate * 100).toStringAsFixed(0)}%$breakdownStatus\x1B[K',
+    'Backend:    [l/L] Latency: ${state.latency.inMilliseconds}ms | [f/F] Fail Rate: ${(state.failureRate * 100).toStringAsFixed(0)}% | $breakdownOpt\x1B[K',
   );
-  buf.writeln('          [b] Trigger Breakdown\x1B[K');
-
   buf.writeln(
     'Resilience: [c/C] CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
   );
   buf.writeln(
-    '            [k/K] Throttling K: ${state.throttlingK.toStringAsFixed(1)}\x1B[K',
+    '            [k/K] Throttling K: ${state.throttlingK.toStringAsFixed(1)} | [r] Retry Budget: ${state.retryBudgetEnabled ? "ON (10%)" : "OFF"}\x1B[K',
   );
   buf.writeln(
-    '            [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle)\x1B[K',
+    '            [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
   );
   buf.writeln(
-    '            [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms | [r] Retry Budget: ${state.retryBudgetEnabled ? "ON (10%)" : "OFF (100% - STORM RISK)"}\x1B[K',
+    'Scenarios:  [s] Spike (5s) | [o] Brownout (15s) | [v] Oscillate (15s)\x1B[K',
   );
+  buf.writeln('Controls:   [q] Quit\x1B[K');
 
   // 6. STATUS & SCENARIO
   buf.writeln(
@@ -975,38 +975,9 @@ void drawUI() {
     }
   }
 
-  if (state.showHelp) {
-    buf.writeln(
-      '--------------------------------------------------------------------------------\x1B[K',
-    );
-    buf.writeln('Hotkeys:\x1B[K');
-    buf.writeln(
-      '  f / F  : Increase / Decrease backend failure rate by 10%\x1B[K',
-    );
-    buf.writeln('  l / L  : Increase / Decrease backend latency by 50ms\x1B[K');
-    buf.writeln(
-      '  b      : Trigger 5-second service breakdown (100% failure rate)\x1B[K',
-    );
-    buf.writeln('  c / C  : Increase / Decrease CB threshold\x1B[K');
-    buf.writeln('  k / K  : Increase / Decrease Throttling K parameter\x1B[K');
-    buf.writeln('  t / T  : Increase / Decrease overall timeout\x1B[K');
-    buf.writeln('  g / G  : Increase / Decrease hedging delay\x1B[K');
-    buf.writeln('  h      : Toggle hedging enabled\x1B[K');
-    buf.writeln('  r      : Toggle retry budget\x1B[K');
-    buf.writeln('  s      : Trigger Traffic Spike scenario (5s)\x1B[K');
-    buf.writeln('  o      : Trigger Latency Brownout scenario (15s)\x1B[K');
-    buf.writeln('  v      : Trigger Oscillating Failures scenario (15s)\x1B[K');
-    buf.writeln('  ?      : Toggle this help overlay\x1B[K');
-    buf.writeln('  q      : Quit the simulator\x1B[K');
-  } else {
-    for (int i = 0; i < 16; i++) {
-      buf.writeln('\x1B[K');
-    }
-  }
   buf.writeln(
     '================================================================================\x1B[K',
   );
-  buf.writeln('Controls: [?] Help | [q] Quit\x1B[K');
 
   stdout.write(buf.toString());
 
@@ -1080,15 +1051,19 @@ void main() async {
 
   // Metrics Sampler: every 500ms
   Timer.periodic(const Duration(milliseconds: 500), (timer) {
-    // Success Rate
-    int total = 0;
     int success = 0;
+    int outcomes = 0;
     for (final c in Criticality.values) {
       final stats = statsTracker.getRollingStats(c);
-      total += stats.total;
       success += stats.success;
+      outcomes +=
+          stats.success +
+          stats.failure +
+          stats.timeout +
+          stats.throttled +
+          stats.blockedCB;
     }
-    final successRate = total == 0 ? 1.0 : success / total;
+    final successRate = outcomes == 0 ? 1.0 : success / outcomes;
     state.successRateHistory.add(successRate);
     if (state.successRateHistory.length > 40) {
       state.successRateHistory.removeAt(0);
