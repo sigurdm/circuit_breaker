@@ -50,10 +50,7 @@ void main() async {
         windowDuration: Duration(seconds: 5),
       ),
       // 3. Retries: Up to 3 attempts with exponential backoff
-      retry: RetryConfig(
-        maxAttempts: 3,
-        baseDelay: Duration(milliseconds: 50),
-      ),
+      retry: RetryConfig(maxAttempts: 3, baseDelay: Duration(milliseconds: 50)),
       // 4. Failure Classifier: Distinguish client errors from system failures
       failureClassifier: (e) {
         if (e is HttpException) {
@@ -81,9 +78,7 @@ void main() async {
     'recommendations',
     myService,
     criticality: Criticality.sheddable, // Low priority
-    retryOverride: RetryConfig(
-      maxAttempts: 1,
-    ), // Don't retry low priority
+    retryOverride: RetryConfig(maxAttempts: 1), // Don't retry low priority
   );
 
   print(

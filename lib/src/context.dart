@@ -89,7 +89,7 @@ final class Resource {
   ///
   /// Throws [ArgumentError] if [name] is empty.
   Resource(this.name, {ResourceConfig? config})
-      : config = config ?? ResourceConfig() {
+    : config = config ?? ResourceConfig() {
     if (name.isEmpty) {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
     }
@@ -270,22 +270,46 @@ final class RetryConfig {
       throw ArgumentError.value(maxAttempts, 'maxAttempts', 'must be >= 1');
     }
     if (baseDelay < Duration.zero) {
-      throw ArgumentError.value(baseDelay, 'baseDelay', 'must be >= Duration.zero');
+      throw ArgumentError.value(
+        baseDelay,
+        'baseDelay',
+        'must be >= Duration.zero',
+      );
     }
     if (maxDelay < baseDelay) {
-      throw ArgumentError.value(maxDelay, 'maxDelay', 'must be >= baseDelay ($baseDelay)');
+      throw ArgumentError.value(
+        maxDelay,
+        'maxDelay',
+        'must be >= baseDelay ($baseDelay)',
+      );
     }
     if (backoffFactor < 1.0) {
-      throw ArgumentError.value(backoffFactor, 'backoffFactor', 'must be >= 1.0');
+      throw ArgumentError.value(
+        backoffFactor,
+        'backoffFactor',
+        'must be >= 1.0',
+      );
     }
     if (retryBudgetRatio < 0.0 || retryBudgetRatio > 1.0) {
-      throw ArgumentError.value(retryBudgetRatio, 'retryBudgetRatio', 'must be in [0.0, 1.0]');
+      throw ArgumentError.value(
+        retryBudgetRatio,
+        'retryBudgetRatio',
+        'must be in [0.0, 1.0]',
+      );
     }
     if (budgetWindow <= Duration.zero) {
-      throw ArgumentError.value(budgetWindow, 'budgetWindow', 'must be positive');
+      throw ArgumentError.value(
+        budgetWindow,
+        'budgetWindow',
+        'must be positive',
+      );
     }
     if (minRequestsForBudget < 0) {
-      throw ArgumentError.value(minRequestsForBudget, 'minRequestsForBudget', 'must be >= 0');
+      throw ArgumentError.value(
+        minRequestsForBudget,
+        'minRequestsForBudget',
+        'must be >= 0',
+      );
     }
   }
 }
@@ -357,7 +381,11 @@ final class ThrottlingConfig {
       throw ArgumentError.value(spread, 'spread', 'must be >= 0.0');
     }
     if (windowDuration <= Duration.zero) {
-      throw ArgumentError.value(windowDuration, 'windowDuration', 'must be positive');
+      throw ArgumentError.value(
+        windowDuration,
+        'windowDuration',
+        'must be positive',
+      );
     }
   }
 
@@ -369,19 +397,31 @@ final class ThrottlingConfig {
     this.windowDuration = const Duration(minutes: 2),
   }) {
     if (k.criticalPlus < 1.0) {
-      throw ArgumentError.value(k.criticalPlus, 'k.criticalPlus', 'must be >= 1.0');
+      throw ArgumentError.value(
+        k.criticalPlus,
+        'k.criticalPlus',
+        'must be >= 1.0',
+      );
     }
     if (k.critical < 1.0) {
       throw ArgumentError.value(k.critical, 'k.critical', 'must be >= 1.0');
     }
     if (k.sheddablePlus < 1.0) {
-      throw ArgumentError.value(k.sheddablePlus, 'k.sheddablePlus', 'must be >= 1.0');
+      throw ArgumentError.value(
+        k.sheddablePlus,
+        'k.sheddablePlus',
+        'must be >= 1.0',
+      );
     }
     if (k.sheddable < 1.0) {
       throw ArgumentError.value(k.sheddable, 'k.sheddable', 'must be >= 1.0');
     }
     if (windowDuration <= Duration.zero) {
-      throw ArgumentError.value(windowDuration, 'windowDuration', 'must be positive');
+      throw ArgumentError.value(
+        windowDuration,
+        'windowDuration',
+        'must be positive',
+      );
     }
   }
 
@@ -479,31 +519,68 @@ final class HedgingConfig {
       throw ArgumentError.value(delay, 'delay', 'must be >= Duration.zero');
     }
     if (minDelay < Duration.zero) {
-      throw ArgumentError.value(minDelay, 'minDelay', 'must be >= Duration.zero');
+      throw ArgumentError.value(
+        minDelay,
+        'minDelay',
+        'must be >= Duration.zero',
+      );
     }
     if (maxDelay < Duration.zero) {
-      throw ArgumentError.value(maxDelay, 'maxDelay', 'must be >= Duration.zero');
+      throw ArgumentError.value(
+        maxDelay,
+        'maxDelay',
+        'must be >= Duration.zero',
+      );
     }
     if (minDelay > maxDelay) {
-      throw ArgumentError.value(minDelay, 'minDelay', 'must be <= maxDelay ($maxDelay)');
+      throw ArgumentError.value(
+        minDelay,
+        'minDelay',
+        'must be <= maxDelay ($maxDelay)',
+      );
     }
-    if (dynamicPercentile != null && (dynamicPercentile! < 0.0 || dynamicPercentile! > 1.0)) {
-      throw ArgumentError.value(dynamicPercentile, 'dynamicPercentile', 'must be in [0.0, 1.0]');
+    if (dynamicPercentile != null &&
+        (dynamicPercentile! < 0.0 || dynamicPercentile! > 1.0)) {
+      throw ArgumentError.value(
+        dynamicPercentile,
+        'dynamicPercentile',
+        'must be in [0.0, 1.0]',
+      );
     }
     if (delayMultiplier <= 0.0) {
-      throw ArgumentError.value(delayMultiplier, 'delayMultiplier', 'must be positive');
+      throw ArgumentError.value(
+        delayMultiplier,
+        'delayMultiplier',
+        'must be positive',
+      );
     }
     if (adaptationRate <= 0.0) {
-      throw ArgumentError.value(adaptationRate, 'adaptationRate', 'must be positive');
+      throw ArgumentError.value(
+        adaptationRate,
+        'adaptationRate',
+        'must be positive',
+      );
     }
     if (overloadPercentile < 0.0 || overloadPercentile > 1.0) {
-      throw ArgumentError.value(overloadPercentile, 'overloadPercentile', 'must be in [0.0, 1.0]');
+      throw ArgumentError.value(
+        overloadPercentile,
+        'overloadPercentile',
+        'must be in [0.0, 1.0]',
+      );
     }
     if (maxOverloadTokens < 0.0) {
-      throw ArgumentError.value(maxOverloadTokens, 'maxOverloadTokens', 'must be >= 0');
+      throw ArgumentError.value(
+        maxOverloadTokens,
+        'maxOverloadTokens',
+        'must be >= 0',
+      );
     }
     if (maxConcurrentHedges < 0) {
-      throw ArgumentError.value(maxConcurrentHedges, 'maxConcurrentHedges', 'must be >= 0');
+      throw ArgumentError.value(
+        maxConcurrentHedges,
+        'maxConcurrentHedges',
+        'must be >= 0',
+      );
     }
   }
 }
