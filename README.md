@@ -188,6 +188,37 @@ final myService = Resource(
 );
 ```
 
+### How Dynamic Hedging Works
+
+Adaptive hedging dynamically adjusts the delay before starting a speculative hedge request, responding to changes in backend latency. It implements several advanced mechanisms to ensure stability, fast reaction times, and overload protection.
+
+#### 1. Retrospective Hedging (Avoiding the Feedback Loop)
+A naive adaptive hedging implementation might only measure the latency of *unhedged* requests (requests that complete before the hedging threshold). However, during a global backend slowdown, this suffers from **survival bias**: the client only measures the few requests that happened to complete quickly. The tracker would falsely conclude the backend is fast, lower the hedging delay, and trigger a runaway loop where 100% of traffic is hedged, DDOSing the backend.
+
+To prevent this, the library implements **Retrospective Hedging**:
+*   It tracks the **best of multiple attempts** (the minimum latency between the primary and the hedged request) for each logical call: \(\min(\text{latency}_{\text{primary}}, \text{latency}_{\text{hedge}})\).
+*   If the backend slows down globally, both attempts will be slow. The tracked latency increases, pushing the hedging delay up and reducing the rate of hedges.
+*   Combined with the **Token Bucket** (see below), this mathematically guarantees that the feedback loop is broken and the system remains stable.
+
+#### 2. Stochastic Percentile Tracking (Robbins-Monro Algorithm)
+To avoid the CPU and memory overhead of storing a rolling window of hundreds of latency samples, the library uses a **stochastic approximation algorithm** (Robbins-Monro) to track the target percentile (e.g., P95) in \(O(1)\) space and time:
+*   On every request, the current raw estimate \(V\) is updated based on whether the request's best latency was "slow" (exceeded \(V\)) or "fast" (was below \(V\)).
+*   If slow, the estimate is increased: \(V_{\text{new}} = V_{\text{old}} \times (1 + \frac{P}{R})\)
+*   If fast, the estimate is decreased: \(V_{\text{new}} = V_{\text{old}} \times (1 - \frac{1 - P}{R})\)
+*   Where \(P\) is the target `dynamicPercentile` (e.g., `0.95`) and \(R\) is the `adaptationRate` (e.g., `10.0`). At the target percentile, the expected change is zero, causing the estimate to track the true percentile.
+
+#### 3. Early Registration
+During a sudden backend outage, waiting for requests to timeout or finish before updating the tracker would cause a slow reaction time.
+*   To solve this, the library starts an **Early Registration Timer** set to the raw percentile estimate \(V\) when a request begins.
+*   If the primary request exceeds \(V\), it is immediately registered as a "slow" sample, adjusting the tracker upward *before* the request even completes or is hedged.
+*   Only one sample is registered per logical request (subsequent completions of the primary or hedge are ignored by the tracker).
+
+#### 4. Overload Protection
+To protect the backend from being overwhelmed by speculative requests:
+*   **Hedging Token Bucket**: A rate limiter that refills tokens at a rate of `1.0 - overloadPercentile` on every logical request. Starting a hedge consumes 1 token. If the bucket is empty, hedging is blocked. This limits the long-term overhead of hedging to at most `1 - overloadPercentile` (e.g., 5% of traffic).
+*   **Concurrency Limit**: Caps the absolute number of concurrent active hedges (`maxConcurrentHedges`) per resource.
+*   **Bypass in Half-Open**: Hedging is automatically disabled when the Circuit Breaker is in the `halfOpen` state, ensuring trial requests do not spawn speculative duplicates.
+
 ## Combining Patterns (Best Practices)
 
 When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the order of execution and how they share state is critical to prevent them from conflicting.
