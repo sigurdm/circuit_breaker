@@ -41,6 +41,7 @@ final class SimulatorState {
   Duration retryBaseDelay = const Duration(milliseconds: 100);
   bool hedgingEnabled = true;
   Duration hedgingDelay = const Duration(milliseconds: 100);
+  double? hedgingDynamicPercentile;
   Duration overallTimeout = const Duration(milliseconds: 500);
   bool retryBudgetEnabled = true;
 
@@ -427,6 +428,7 @@ ResourceConfig buildConfig() {
     hedging: HedgingConfig(
       enabled: state.hedgingEnabled,
       delay: state.hedgingDelay,
+      dynamicPercentile: state.hedgingDynamicPercentile,
     ),
     timeout: state.overallTimeout,
   );
@@ -617,6 +619,16 @@ void handleKey(String key) {
         state.hedgingEnabled = !state.hedgingEnabled;
         state.configChanged = true;
         setStatus('Hedging ${state.hedgingEnabled ? "enabled" : "disabled"}');
+      case 'H':
+        if (state.hedgingDynamicPercentile == null) {
+          state.hedgingDynamicPercentile = 0.95;
+          state.hedgingEnabled = true;
+          setStatus('Dynamic hedging enabled (0.95)');
+        } else {
+          state.hedgingDynamicPercentile = null;
+          setStatus('Dynamic hedging disabled');
+        }
+        state.configChanged = true;
       case 'r':
         state.retryBudgetEnabled = !state.retryBudgetEnabled;
         state.configChanged = true;
@@ -1001,11 +1013,28 @@ void drawUI() {
   buf.writeln(
     '            [k/K] Base K: ${state.throttlingK.toStringAsFixed(1)} (Shed: $kShed, Shed+: $kShedPlus, Crit: $kCrit, Crit+: $kCritPlus)\x1B[K',
   );
-  final hedgeStr = state.hedgingEnabled
-      ? "${state.hedgingDelay.inMilliseconds}ms"
-      : "OFF";
+  String hedgeStr;
+  if (!state.hedgingEnabled) {
+    hedgeStr = 'OFF';
+  } else if (state.hedgingDynamicPercentile != null) {
+    if (resState != null) {
+      final estimate = resState.dynamicDelayEstimate;
+      final multiplier = resState.config.hedging.delayMultiplier;
+      final target = Duration(
+        microseconds: (estimate.inMicroseconds * multiplier).round(),
+      );
+      final p = state.hedgingDynamicPercentile!;
+      hedgeStr =
+          'DYNAMIC (P${(p * 100).toInt()}: ${estimate.inMilliseconds}ms -> Target: ${target.inMilliseconds}ms)';
+    } else {
+      final p = state.hedgingDynamicPercentile!;
+      hedgeStr = 'DYNAMIC (P${(p * 100).toInt()}: waiting...)';
+    }
+  } else {
+    hedgeStr = '${state.hedgingDelay.inMilliseconds}ms';
+  }
   buf.writeln(
-    '            [g/G] Hedge: $hedgeStr ([h] Toggle) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
+    '            [g/G] Hedge: $hedgeStr ([h] Toggle, [H] Toggle Dynamic) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
   );
   buf.writeln(
     'Scenarios:  [s] Spike (5s) | [o] Brownout (15s) | [v] Oscillate (15s)\x1B[K',
