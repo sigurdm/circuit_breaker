@@ -26,7 +26,7 @@ import 'exceptions.dart';
 /// ```
 bool _defaultFailureClassifier(Object _) => true;
 
-class ResourceConfig {
+final class ResourceConfig {
   /// Configuration for the circuit breaker mechanism.
   final CircuitBreakerConfig circuitBreaker;
 
@@ -69,7 +69,7 @@ class ResourceConfig {
 /// Represents a remote service or component.
 ///
 /// Resources hold shared state like circuit breakers and throttling history.
-class Resource {
+final class Resource {
   /// The name of the resource (e.g., 'users-api').
   final String name;
 
@@ -101,7 +101,7 @@ enum Criticality {
 ///
 /// Operations belong to a [Resource] and can have specific overrides
 /// for hedging and retry configurations.
-class Operation {
+final class Operation {
   /// The name of the operation (e.g., 'get-user').
   final String name;
 
@@ -145,7 +145,7 @@ class Operation {
 ///   resetTimeout: Duration(seconds: 30), // Wait 30s before trying again
 /// );
 /// ```
-class CircuitBreakerConfig {
+final class CircuitBreakerConfig {
   /// The number of consecutive failures allowed before the circuit trips to Open.
   final int consecutiveFailuresThreshold;
 
@@ -178,7 +178,7 @@ class CircuitBreakerConfig {
 ///   enableJitter: true,
 /// );
 /// ```
-class RetryConfig {
+final class RetryConfig {
   /// The maximum number of attempts (including the initial call) to make.
   final int maxAttempts;
 
@@ -252,16 +252,23 @@ final class ThrottlingConfig {
 
   /// Creates a [ThrottlingConfig] with a base [k] and a [spread] factor.
   ///
+  /// Preconditions:
+  /// - [k] is the base multiplier. Typically positive (greater than 1.0). Defaults to 2.0.
+  /// - [spread] must be non-negative (greater than or equal to 0.0). Defaults to 1.0.
+  ///
   /// The effective K values for each criticality level are calculated as:
   /// - `criticalPlus`: `k * (1.0 + 3.0 * spread)`
   /// - `critical`: `k`
   /// - `sheddablePlus`: `k * (1.0 - 0.2 * spread)` (min 1.1)
   /// - `sheddable`: `k * (1.0 - 0.4 * spread)` (min 1.1)
+  ///
+  /// Throws [AssertionError] in debug mode if [spread] is negative.
   const ThrottlingConfig({
     double k = 2.0,
     double spread = 1.0,
     this.windowDuration = const Duration(minutes: 2),
-  }) : k = (
+  }) : assert(spread >= 0.0, 'spread must be non-negative'),
+       k = (
          criticalPlus: k * (1.0 + 3.0 * spread),
          critical: k,
          sheddablePlus: k * (1.0 - 0.2 * spread) < 1.1
@@ -312,7 +319,7 @@ final class ThrottlingConfig {
 ///   delay: Duration(milliseconds: 200), // Hedge if not finished in 200ms
 /// );
 /// ```
-class HedgingConfig {
+final class HedgingConfig {
   /// The static delay after which a speculative second request is sent.
   /// Used if [dynamicPercentile] is null.
   final Duration delay;
@@ -385,7 +392,7 @@ class HedgingConfig {
 ///   print('Operation failed or was throttled: $e');
 /// }
 /// ```
-class ResilienceContext {
+final class ResilienceContext {
   final Map<String, ResourceState> _states = {};
 
   /// Gets the states for all resources.
@@ -558,7 +565,7 @@ class ResilienceContext {
 
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
-class ResourceState {
+final class ResourceState {
   ResourceConfig _config;
   ResourceConfig get config => _config;
   set config(ResourceConfig newConfig) {
@@ -712,7 +719,7 @@ class ResourceState {
 enum CircuitState { closed, open, halfOpen }
 
 /// Records a request attempt for throttling calculations.
-class RequestRecord {
+final class RequestRecord {
   final DateTime timestamp;
   final bool accepted;
 
@@ -731,6 +738,6 @@ final class RetryAttemptRecord {
   const RetryAttemptRecord(this.timestamp, {required this.isRetry});
 }
 
-class _OperationCancelledException implements Exception {
+final class _OperationCancelledException implements Exception {
   const _OperationCancelledException();
 }

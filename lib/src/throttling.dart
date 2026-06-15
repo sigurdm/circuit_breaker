@@ -10,7 +10,7 @@ import 'context.dart';
 /// Google SRE adaptive throttling formula.
 ///
 /// This is an internal implementation detail and is not exported in the public API.
-class AdaptiveThrottler {
+final class AdaptiveThrottler {
   final ResourceConfig config;
   final ResourceState state;
 
@@ -55,7 +55,7 @@ class AdaptiveThrottler {
 ///   // Fallback or wait and retry
 /// }
 /// ```
-class ThrottledException implements Exception {
+final class ThrottledException implements Exception {
   /// Message describing the reason for throttling.
   final String message;
 

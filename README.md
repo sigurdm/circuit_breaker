@@ -131,6 +131,36 @@ final userAction = Operation(
 );
 ```
 
+To enable this, `ThrottlingConfig` automatically spreads the sensitivity multiplier ($K$) across different criticality levels.
+
+By default, `ThrottlingConfig(k: base, spread: 1.0)` calculates the effective $K$ for each level as:
+*   **`criticalPlus`**: `k * 4.0` (tolerant to failures, default `8.0`).
+*   **`critical`** (default level): `k` (default `2.0`).
+*   **`sheddablePlus`**: `max(k * 0.8, 1.1)` (default `1.6`).
+*   **`sheddable`**: `max(k * 0.6, 1.1)` (default `1.2`).
+
+A lower $K$ makes throttling more aggressive. Under default settings, `sheddable` traffic starts throttling earlier (when failures exceed 16%), while `critical` traffic tolerates up to 50% failures, and `criticalPlus` is shielded from throttling.
+
+You can adjust the width of this spread using the `spread` parameter (setting `spread: 0.0` collapses all levels to use the same base `k`).
+
+For complete control, you can configure the values explicitly using a Dart Record:
+```dart
+final myService = Resource(
+  'my-service',
+  config: ResourceConfig(
+    throttling: ThrottlingConfig.withCriticality(
+      k: (
+        criticalPlus: 10.0,
+        critical: 2.0,
+        sheddablePlus: 1.5,
+        sheddable: 1.1,
+      ),
+    ),
+  ),
+);
+```
+
+
 ## Combining Patterns (Best Practices)
 
 When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the order of execution and how they share state is critical to prevent them from conflicting.
@@ -175,7 +205,9 @@ To maintain accurate health metrics:
 
 *   **Circuit Breaker `consecutiveFailuresThreshold`** must be set to **at least `maxAttempts + 2`** (e.g., if max retry attempts is 3, set CB threshold to 5). Otherwise, a single request exhausting its retries will trip the circuit breaker for all other traffic.
 *   **Hedging `delay`** should be set to the **P90 or P95 latency** of the target service under normal load. This ensures you only duplicate the slowest 5% of requests.
-*   **Adaptive Throttling `k`** (multiplier) should default to **`2.0`** (allows the backend to fail up to 50% of requests before client-side throttling kicks in). Lower it (e.g. `1.5`) to protect fragile backends more aggressively.
+*   **Adaptive Throttling `k` & `spread`**:
+    *   **`k`** (base multiplier) should default to **`2.0`** (which sets the sensitivity for the default `critical` traffic, allowing up to 50% failures).
+    *   **`spread`** (default **`1.0`**) controls how aggressively sheddable traffic is dropped relative to critical traffic. Adjusting `spread` to `0.0` disables priority-based throttling, treating all traffic equally.
 
 ## References
 

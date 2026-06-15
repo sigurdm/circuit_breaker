@@ -5,7 +5,7 @@ import 'context.dart';
 /// This pattern was popularized by Michael Nygard in his book "Release It!" (2007).
 /// For a detailed online description, see Martin Fowler's article:
 /// https://martinfowler.com/bliki/CircuitBreaker.html
-class CircuitBreaker {
+final class CircuitBreaker {
   final ResourceConfig config;
   final ResourceState state;
 
