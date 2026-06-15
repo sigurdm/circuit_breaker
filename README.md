@@ -38,6 +38,10 @@ The circuit breaker transitions through three states:
 Speculatively sends a second, parallel request if the first request does not complete within a configured delay. 
 If a service has a 5% chance of taking >1s, hedging after 1s reduces the probability of both requests taking >1s to $0.05 \times 0.05 = 0.25\%$, significantly reducing tail latency at the cost of at most 5% extra traffic.
 
+The library supports two modes of hedging:
+*   **Static Hedging**: Uses a fixed pre-configured delay.
+*   **Dynamic (Adaptive) Hedging**: Automatically estimates the target percentile latency (e.g., P95) at runtime using a memory-efficient stochastic tracker (Robbins-Monro algorithm) and adjusts the hedging delay dynamically. It includes overload protection (token bucket) to limit the percentage of traffic hedged, and concurrency limits to avoid thundering herds.
+
 > [!IMPORTANT]
 > Only use hedging for **idempotent** operations (like reads) as it causes operations to be executed multiple times.
 
@@ -161,6 +165,29 @@ final myService = Resource(
 ```
 
 
+### Dynamic Hedging Configuration
+
+To enable dynamic hedging, configure `dynamicPercentile` (e.g., `0.95` for P95) in the `HedgingConfig`. The library will dynamically adjust the hedging delay based on runtime latency samples.
+
+```dart
+final myService = Resource(
+  'my-service',
+  config: ResourceConfig(
+    hedging: HedgingConfig(
+      enabled: true,
+      dynamicPercentile: 0.95, // Track P95 latency
+      delayMultiplier: 2.0,    // Hedge delay is 2 * P95
+      minDelay: Duration(milliseconds: 10),
+      maxDelay: Duration(seconds: 2),
+      adaptationRate: 10.0,    // Speed of adaptation
+      overloadPercentile: 0.95, // Refill rate for token bucket (max 5% hedged requests)
+      maxOverloadTokens: 10.0,
+      maxConcurrentHedges: 5,   // Concurrency limit per resource
+    ),
+  ),
+);
+```
+
 ## Combining Patterns (Best Practices)
 
 When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the order of execution and how they share state is critical to prevent them from conflicting.
@@ -204,7 +231,10 @@ To maintain accurate health metrics:
 ### Configuration Rules of Thumb
 
 *   **Circuit Breaker `consecutiveFailuresThreshold`** must be set to **at least `maxAttempts + 2`** (e.g., if max retry attempts is 3, set CB threshold to 5). Otherwise, a single request exhausting its retries will trip the circuit breaker for all other traffic.
-*   **Hedging `delay`** should be set to the **P90 or P95 latency** of the target service under normal load. This ensures you only duplicate the slowest 5% of requests.
+*   **Hedging Delay**:
+    *   For **Static Hedging**, set `delay` to the **P90 or P95 latency** of the target service under normal load. This ensures you only duplicate the slowest 10% or 5% of requests.
+    *   For **Dynamic Hedging**, set `dynamicPercentile` to `0.90` or `0.95` and the library will track this latency automatically. Use `delayMultiplier` (default `2.0`) to apply a safety margin before sending the hedge.
+    *   Use `overloadPercentile` (default `0.95`) to prevent hedging from exceeding a safe fraction of total traffic (e.g., 5% of requests) under sustained backend slowness.
 *   **Adaptive Throttling `k` & `spread`**:
     *   **`k`** (base multiplier) should default to **`2.0`** (which sets the sensitivity for the default `critical` traffic, allowing up to 50% failures).
     *   **`spread`** (default **`1.0`**) controls how aggressively sheddable traffic is dropped relative to critical traffic. Adjusting `spread` to `0.0` disables priority-based throttling, treating all traffic equally.
