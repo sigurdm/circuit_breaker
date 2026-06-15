@@ -317,8 +317,8 @@ void processCommand(String line) {
       case 'help':
         state.showHelp = true;
       case 'quit':
-        // Restore cursor and clear screen on quit
-        stdout.write('\x1B[2J\x1B[0;0H');
+        // Exit alternative screen buffer
+        stdout.write('\x1B[?1049l');
         exit(0);
       default:
         setStatus('Unknown command: $cmd. Type "help" for info.');
@@ -498,8 +498,16 @@ void drawUI() {
 }
 
 void main() async {
+  // Enter alternative screen buffer
+  stdout.write('\x1B[?1049h');
   // Clear screen once at start
   stdout.write('\x1B[2J\x1B[0;0H');
+
+  // Handle Ctrl+C to restore terminal screen buffer before exiting
+  ProcessSignal.sigint.watch().listen((signal) {
+    stdout.write('\x1B[?1049l');
+    exit(0);
+  });
 
   var resource = Resource('api-service', config: buildConfig());
 
