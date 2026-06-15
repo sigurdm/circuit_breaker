@@ -24,6 +24,10 @@ final class SimulatorState {
   bool showHelp = false;
   String lastStatusMessage = 'Simulator started. Type "help" for commands.';
   bool configChanged = false;
+
+  Timer? breakdownTimer;
+  double? savedFailureRate;
+  bool isBreakdownActive = false;
 }
 
 final state = SimulatorState();
@@ -237,10 +241,39 @@ void processCommand(String line) {
         if (val < 0.0 || val > 1.0) {
           throw Exception('Must be between 0.0 and 1.0');
         }
+        if (state.isBreakdownActive) {
+          state.breakdownTimer?.cancel();
+          state.isBreakdownActive = false;
+          state.savedFailureRate = null;
+          state.breakdownTimer = null;
+        }
         state.failureRate = val;
         setStatus(
           'Backend failure rate set to ${(val * 100).toStringAsFixed(0)}%',
         );
+      case 'breakdown':
+        final duration = args.isEmpty ? 5 : int.tryParse(args[0]) ?? 5;
+        if (duration <= 0) throw Exception('Duration must be positive');
+
+        state.breakdownTimer?.cancel();
+
+        if (!state.isBreakdownActive) {
+          state.savedFailureRate = state.failureRate;
+          state.isBreakdownActive = true;
+        }
+
+        state.failureRate = 1.0;
+        setStatus('Service breakdown active for ${duration}s...');
+
+        state.breakdownTimer = Timer(Duration(seconds: duration), () {
+          state.failureRate = state.savedFailureRate ?? 0.0;
+          state.isBreakdownActive = false;
+          state.savedFailureRate = null;
+          state.breakdownTimer = null;
+          setStatus(
+            'Service recovered (failure rate restored to ${(state.failureRate * 100).toStringAsFixed(0)}%)',
+          );
+        });
       case 'latency':
         if (args.isEmpty) throw Exception('Missing value');
         final val = int.parse(args[0]);
@@ -397,8 +430,11 @@ void drawUI() {
   buf.writeln(
     '--------------------------------------------------------------------------------\x1B[K',
   );
+  final breakdownStatus = state.isBreakdownActive
+      ? ' \x1B[31m[BREAKDOWN ACTIVE]\x1B[0m'
+      : '';
   buf.writeln(
-    'Backend Config:        Latency: ${state.latency.inMilliseconds}ms | Failure Rate: ${(state.failureRate * 100).toStringAsFixed(0)}%\x1B[K',
+    'Backend Config:        Latency: ${state.latency.inMilliseconds}ms | Failure Rate: ${(state.failureRate * 100).toStringAsFixed(0)}%$breakdownStatus\x1B[K',
   );
   buf.writeln(
     'Resilience Config:     CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
@@ -426,6 +462,9 @@ void drawUI() {
       '  fail <0.0-1.0>      Set backend failure rate (e.g., fail 0.4)\x1B[K',
     );
     buf.writeln(
+      '  breakdown <sec>     Simulate temporary breakdown (default 5s)\x1B[K',
+    );
+    buf.writeln(
       '  latency <ms>        Set backend latency (e.g., latency 150)\x1B[K',
     );
     buf.writeln(
@@ -444,7 +483,7 @@ void drawUI() {
     buf.writeln('  quit                Exit the simulator\x1B[K');
     buf.writeln('  (Any key to close help)\x1B[K');
   } else {
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 12; i++) {
       buf.writeln('\x1B[K');
     }
   }
@@ -479,14 +518,10 @@ void main() async {
     drawUI();
   });
 
-  // Position prompt initially (line 37 because we added Timeout line in stats)
-  // Wait, let's recalculate the prompt line.
-  // We added "Timeout Rate: ..." line, which is 1 more line.
-  // So basic lines is 23 now.
-  // Help adds 11 lines.
-  // Total 35 lines.
-  // Prompt at line 37.
-  stdout.write('\x1B[37;0H');
+  // Position prompt initially
+  // Dashboard height is 23 (basic) + 12 (help/blank) + 2 (borders/status) = 37 lines.
+  // Prompt at line 38.
+  stdout.write('\x1B[38;0H');
   stdout.write('Simulator command > ');
 
   // Listen to stdin
@@ -497,7 +532,7 @@ void main() async {
     processCommand(line);
 
     // Reposition prompt and clear the line
-    stdout.write('\x1B[37;0H\x1B[K');
+    stdout.write('\x1B[38;0H\x1B[K');
     stdout.write('Simulator command > ');
   });
 }
