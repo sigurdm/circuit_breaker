@@ -790,19 +790,36 @@ final class ResilienceContext {
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
 final class ResourceState {
+  /// The active configuration for the resource.
   ResourceConfig _config;
+
+  /// The active configuration for the resource.
+  ///
+  /// Can be updated dynamically.
   ResourceConfig get config => _config;
   set config(ResourceConfig newConfig) {
     _config = newConfig;
     hedgingTokens = hedgingTokens.clamp(0.0, _config.hedging.maxOverloadTokens);
   }
 
-  // Circuit Breaker State
+  /// The number of consecutive failures for the resource.
+  ///
+  /// Should only be mutated by the library.
   int failureCount = 0;
+
+  /// The timestamp of the last recorded failure.
+  ///
+  /// Should only be mutated by the library.
   DateTime? lastFailureTime;
+
   CircuitState _circuitState = CircuitState.closed;
+
+  /// The timestamp of the last circuit state change.
   DateTime lastStateChange = DateTime.now();
 
+  /// The current state of the circuit breaker.
+  ///
+  /// Should only be mutated by the library.
   CircuitState get circuitState => _circuitState;
   set circuitState(CircuitState newState) {
     if (_circuitState != newState) {
@@ -811,7 +828,9 @@ final class ResourceState {
     }
   }
 
-  // Throttling State (isolated per criticality)
+  /// The history of requests, isolated by criticality.
+  ///
+  /// Should only be mutated by the library.
   final Map<Criticality, List<RequestRecord>> requestHistory = {
     Criticality.criticalPlus: [],
     Criticality.critical: [],
@@ -819,21 +838,37 @@ final class ResourceState {
     Criticality.sheddable: [],
   };
 
-  // Retry Budget State
+  /// The history of retry attempts.
+  ///
+  /// Should only be mutated by the library.
   final List<RetryAttemptRecord> retryHistory = [];
 
-  // Hedging State
+  /// Current tokens in the hedging token bucket.
+  ///
+  /// Should only be mutated by the library.
   late double hedgingTokens;
+
+  /// Current number of active hedges.
+  ///
+  /// Should only be mutated by the library.
   int activeHedges = 0;
+
   Duration? _dynamicDelayEstimate;
 
+  /// The current estimate for the hedging delay.
+  ///
+  /// If dynamic hedging is disabled, returns the static delay.
   Duration get dynamicDelayEstimate =>
       _dynamicDelayEstimate ?? config.hedging.delay;
 
+  /// Creates a [ResourceState] with the initial configuration.
   ResourceState(this._config) {
     hedgingTokens = _config.hedging.maxOverloadTokens;
   }
 
+  /// Refills the hedging token bucket based on a new logical request.
+  ///
+  /// **Internal use only.**
   void recordLogicalRequest() {
     final hedgingConfig = config.hedging;
     hedgingTokens = min(
@@ -842,6 +877,10 @@ final class ResourceState {
     );
   }
 
+  /// Attempts to start a hedge, checking concurrency and token limits.
+  ///
+  /// Returns true if the hedge is allowed to start, and consumes one token.
+  /// **Internal use only.**
   bool tryStartHedge() {
     final hedgingConfig = config.hedging;
     if (activeHedges >= hedgingConfig.maxConcurrentHedges) {
@@ -855,10 +894,16 @@ final class ResourceState {
     return true;
   }
 
+  /// Records that a hedge has completed, decrementing the active count.
+  ///
+  /// **Internal use only.**
   void hedgeCompleted() {
     activeHedges = max(0, activeHedges - 1);
   }
 
+  /// Records a hedging latency sample to update the dynamic delay estimate.
+  ///
+  /// **Internal use only.**
   void recordHedgingSample({required bool isSlow}) {
     final hedgingConfig = config.hedging;
     if (hedgingConfig.dynamicPercentile == null) return;
@@ -881,10 +926,16 @@ final class ResourceState {
     _dynamicDelayEstimate = Duration(microseconds: newUs.round());
   }
 
+  /// Records a request outcome (accepted or not) for throttling.
+  ///
+  /// **Internal use only.**
   void recordRequest(bool accepted, Criticality criticality) {
     requestHistory[criticality]!.add(RequestRecord(DateTime.now(), accepted));
   }
 
+  /// Cleans up history records that are older than the configured windows.
+  ///
+  /// **Internal use only.**
   void cleanHistory(DateTime now) {
     final cutoff = now.subtract(config.throttling.windowDuration);
     for (final history in requestHistory.values) {
@@ -944,9 +995,13 @@ enum CircuitState { closed, open, halfOpen }
 
 /// Records a request attempt for throttling calculations.
 final class RequestRecord {
+  /// The timestamp when the request was attempted.
   final DateTime timestamp;
+
+  /// Whether the request was accepted (successful) by the backend.
   final bool accepted;
 
+  /// Creates a [RequestRecord].
   RequestRecord(this.timestamp, this.accepted);
 }
 
