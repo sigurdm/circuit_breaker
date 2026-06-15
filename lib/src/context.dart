@@ -272,17 +272,50 @@ class ThrottlingConfig {
 /// );
 /// ```
 class HedgingConfig {
-  /// The delay after which a speculative second request is sent.
-  /// Typically set to P95 or P99 latency of the resource.
+  /// The static delay after which a speculative second request is sent.
+  /// Used if [dynamicPercentile] is null.
   final Duration delay;
 
   /// Whether hedging is enabled for this resource.
   final bool enabled;
 
+  /// If non-null, dynamic hedging is enabled and this percentile (e.g. 0.95)
+  /// is tracked to determine the hedging delay.
+  final double? dynamicPercentile;
+
+  /// Multiplier applied to the tracked percentile to calculate the actual hedging delay.
+  final double delayMultiplier;
+
+  /// Lower bound for the calculated dynamic delay.
+  final Duration minDelay;
+
+  /// Upper bound for the calculated dynamic delay.
+  final Duration maxDelay;
+
+  /// Controls the speed at which the dynamic delay adapts.
+  final double adaptationRate;
+
+  /// Used to set the token bucket refill rate (e.g. 0.95 means we hedge at most 5% of traffic).
+  final double overloadPercentile;
+
+  /// Capacity of the token bucket.
+  final double maxOverloadTokens;
+
+  /// Concurrency cap on the number of simultaneous active hedges per resource.
+  final int maxConcurrentHedges;
+
   /// Creates a [HedgingConfig].
   const HedgingConfig({
     this.delay = const Duration(milliseconds: 500),
     this.enabled = false,
+    this.dynamicPercentile,
+    this.delayMultiplier = 2.0,
+    this.minDelay = const Duration(milliseconds: 10),
+    this.maxDelay = const Duration(seconds: 10),
+    this.adaptationRate = 10.0,
+    this.overloadPercentile = 0.95,
+    this.maxOverloadTokens = 10.0,
+    this.maxConcurrentHedges = 5,
   });
 }
 
@@ -485,7 +518,12 @@ class ResilienceContext {
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
 class ResourceState {
-  ResourceConfig config;
+  ResourceConfig _config;
+  ResourceConfig get config => _config;
+  set config(ResourceConfig newConfig) {
+    _config = newConfig;
+    hedgingTokens = hedgingTokens.clamp(0.0, _config.hedging.maxOverloadTokens);
+  }
 
   // Circuit Breaker State
   int failureCount = 0;
@@ -512,7 +550,64 @@ class ResourceState {
   // Retry Budget State
   final List<RetryAttemptRecord> retryHistory = [];
 
-  ResourceState(this.config);
+  // Hedging State
+  late double hedgingTokens;
+  int activeHedges = 0;
+  Duration? _dynamicDelayEstimate;
+
+  Duration get dynamicDelayEstimate =>
+      _dynamicDelayEstimate ?? config.hedging.delay;
+
+  ResourceState(this._config) {
+    hedgingTokens = _config.hedging.maxOverloadTokens;
+  }
+
+  void recordLogicalRequest() {
+    final hedgingConfig = config.hedging;
+    hedgingTokens = min(
+      hedgingConfig.maxOverloadTokens,
+      hedgingTokens + (1.0 - hedgingConfig.overloadPercentile),
+    );
+  }
+
+  bool tryStartHedge() {
+    final hedgingConfig = config.hedging;
+    if (activeHedges >= hedgingConfig.maxConcurrentHedges) {
+      return false;
+    }
+    if (hedgingTokens < 1.0) {
+      return false;
+    }
+    activeHedges++;
+    hedgingTokens -= 1.0;
+    return true;
+  }
+
+  void hedgeCompleted() {
+    activeHedges = max(0, activeHedges - 1);
+  }
+
+  void recordHedgingSample({required bool isSlow}) {
+    final hedgingConfig = config.hedging;
+    if (hedgingConfig.dynamicPercentile == null) return;
+
+    final p = hedgingConfig.dynamicPercentile!;
+    final r = hedgingConfig.adaptationRate;
+    final currentUs = dynamicDelayEstimate.inMicroseconds.toDouble();
+
+    double newUs;
+    if (isSlow) {
+      newUs = currentUs * (1.0 + (p / r));
+    } else {
+      newUs = currentUs * (1.0 - ((1.0 - p) / r));
+    }
+
+    final minUs = hedgingConfig.minDelay.inMicroseconds.toDouble();
+    final maxUs = hedgingConfig.maxDelay.inMicroseconds.toDouble();
+    newUs = newUs.clamp(minUs, maxUs);
+
+    _dynamicDelayEstimate = Duration(microseconds: newUs.round());
+  }
 
   void recordRequest(bool accepted, Criticality criticality) {
     requestHistory[criticality]!.add(RequestRecord(DateTime.now(), accepted));
