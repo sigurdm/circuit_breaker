@@ -47,6 +47,29 @@ The library supports two modes of hedging:
 > [!IMPORTANT]
 > Only use hedging for **idempotent** operations (like reads) as it causes operations to be executed multiple times.
 
+### Dynamic vs. Static Hedging
+
+Choosing between static and dynamic hedging depends on your backend's characteristics and your operational requirements.
+
+| Scenario / Feature | Static Hedging (Fixed Delay) | Dynamic Hedging (Adaptive) |
+| :--- | :--- | :--- |
+| **Stable Load** | Works well if tuned correctly, but requires manual retuning if the backend latency profile changes. | Self-tunes to track the target percentile, maintaining a constant, predictable hedge rate. |
+| **Latency Spikes** (e.g., GC pause) | Mitigates the spike for requests exceeding the static threshold. | Adapts slowly (due to tracker inertia), allowing it to hedge spiked requests. |
+| **Global Backend Slowdown** | Static threshold is permanently exceeded, causing the client to hedge almost 100% of requests, adding load when the backend is struggling. | Adapts by increasing the hedging delay to continue hedging only the new tail (worst 5%), keeping load stable. |
+
+#### Trade-offs of Dynamic Hedging
+
+*   **Complexity**: Requires configuring and tuning multiple parameters (percentile, adaptation rate, min/max delays, token bucket limits).
+*   **Cold Start**: Starts with a default estimate and takes time (a stream of requests) to converge to the true percentile.
+*   **State Interference**: Since the latency estimate is shared at the `Resource` level, running operations with vastly different latency profiles (e.g., a 10ms read vs. a 5s write) on the same resource will corrupt the shared estimate.
+
+#### When to Use Static Hedging
+
+*   **Short-Lived Clients**: CLI tools or serverless functions (e.g., Cloud Functions) that exit quickly do not live long enough to build a latency history.
+*   **Strict SLAs**: If you have a hard constraint (e.g., "responses must arrive within 100ms"), a static hedge at 60ms is preferred to force attempts to meet the SLA, rather than adapting to a slower backend.
+*   **Highly Predictable Latency**: If the backend has a fixed, guaranteed latency profile, static hedging avoids the overhead of dynamic tracking.
+*   **Simplicity**: In low-traffic or non-critical systems, static hedging is easier to configure and reason about.
+
 ## Resource and Context Model
 
 The library models your system's dependencies using three core concepts:
