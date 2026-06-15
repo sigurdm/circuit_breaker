@@ -667,5 +667,116 @@ void main() {
         expect(attempts, equals(2));
       });
     });
+
+    group('Monitoring APIs', () {
+      late ResourceState state;
+
+      setUp(() {
+        final config = const ResourceConfig(
+          throttling: ThrottlingConfig(
+            k: 2.0,
+            windowDuration: Duration(seconds: 1),
+          ),
+          retry: RetryConfig(budgetWindow: Duration(seconds: 1)),
+        );
+        state = ResourceState(config);
+      });
+
+      test('Retry Budget metrics', () {
+        final now = DateTime.now();
+        state.retryHistory.addAll([
+          RetryAttemptRecord(now, isRetry: false),
+          RetryAttemptRecord(now, isRetry: true),
+          RetryAttemptRecord(now, isRetry: false),
+        ]);
+
+        expect(state.getRetryBudgetRequests(), 3);
+        expect(state.getRetryBudgetRetries(), 1);
+        expect(state.getRetryBudgetRatio(), closeTo(1 / 3, 0.0001));
+      });
+
+      test('Retry Budget metrics empty', () {
+        expect(state.getRetryBudgetRequests(), 0);
+        expect(state.getRetryBudgetRetries(), 0);
+        expect(state.getRetryBudgetRatio(), 0.0);
+      });
+
+      test('Throttling metrics', () {
+        final now = DateTime.now();
+        state.requestHistory[Criticality.critical]!.addAll([
+          RequestRecord(now, true),
+          RequestRecord(now, false),
+          RequestRecord(now, true),
+        ]);
+
+        expect(state.getThrottlingRequests(Criticality.critical), 3);
+        expect(state.getThrottlingAccepts(Criticality.critical), 2);
+
+        // P = max(0, (requests - k * accepts) / (requests + 1))
+        // requests = 3, accepts = 2, k = 2.0
+        // P = max(0, (3 - 2.0 * 2) / (3 + 1)) = max(0, -1 / 4) = 0.0
+        expect(
+          state.getThrottlingRejectionProbability(Criticality.critical),
+          0.0,
+        );
+
+        // Add more failures to make P > 0
+        state.requestHistory[Criticality.critical]!.addAll([
+          RequestRecord(now, false),
+          RequestRecord(now, false),
+        ]);
+        // requests = 5, accepts = 2, k = 2.0
+        // P = max(0, (5 - 4) / 6) = 1/6 = 0.1666...
+        expect(state.getThrottlingRequests(Criticality.critical), 5);
+        expect(state.getThrottlingAccepts(Criticality.critical), 2);
+        expect(
+          state.getThrottlingRejectionProbability(Criticality.critical),
+          closeTo(1 / 6, 0.0001),
+        );
+      });
+
+      test('Throttling metrics empty', () {
+        expect(state.getThrottlingRequests(Criticality.critical), 0);
+        expect(state.getThrottlingAccepts(Criticality.critical), 0);
+        expect(
+          state.getThrottlingRejectionProbability(Criticality.critical),
+          0.0,
+        );
+      });
+
+      test('cleanHistory triggering', () async {
+        final oldTime = DateTime.now().subtract(const Duration(seconds: 2));
+        final now = DateTime.now();
+
+        state.retryHistory.add(RetryAttemptRecord(oldTime, isRetry: true));
+        state.requestHistory[Criticality.critical]!.add(
+          RequestRecord(oldTime, true),
+        );
+
+        // Before calling monitoring, they are there (if we don't clean)
+        // But monitoring methods call cleanHistory first.
+        expect(state.getRetryBudgetRequests(), 0); // should be cleaned
+        expect(
+          state.getThrottlingRequests(Criticality.critical),
+          0,
+        ); // should be cleaned
+
+        // Add mixed old and new
+        state.retryHistory.addAll([
+          RetryAttemptRecord(oldTime, isRetry: true),
+          RetryAttemptRecord(now, isRetry: false),
+        ]);
+        state.requestHistory[Criticality.critical]!.addAll([
+          RequestRecord(oldTime, true),
+          RequestRecord(now, true),
+        ]);
+
+        expect(state.getRetryBudgetRequests(), 1); // only new one remains
+        expect(
+          state.getThrottlingRequests(Criticality.critical),
+          1,
+        ); // only new one remains
+      });
+    });
   });
 }

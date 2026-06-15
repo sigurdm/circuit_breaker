@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'circuit_breaker.dart';
 import 'retry.dart';
 import 'hedging.dart';
@@ -527,6 +528,47 @@ class ResourceState {
     retryHistory.removeWhere(
       (record) => record.timestamp.isBefore(retryCutoff),
     );
+  }
+
+  /// Returns the number of requests in the retry budget window.
+  int getRetryBudgetRequests() {
+    cleanHistory(DateTime.now());
+    return retryHistory.length;
+  }
+
+  /// Returns the number of retries in the retry budget window.
+  int getRetryBudgetRetries() {
+    cleanHistory(DateTime.now());
+    return retryHistory.where((r) => r.isRetry).length;
+  }
+
+  /// Returns the ratio of retries to total requests in the retry budget window.
+  double getRetryBudgetRatio() {
+    final requests = getRetryBudgetRequests();
+    if (requests == 0) return 0.0;
+    return getRetryBudgetRetries() / requests;
+  }
+
+  /// Returns the number of request records for that criticality in the throttling window.
+  int getThrottlingRequests(Criticality criticality) {
+    cleanHistory(DateTime.now());
+    return requestHistory[criticality]?.length ?? 0;
+  }
+
+  /// Returns the number of accepted request records for that criticality in the throttling window.
+  int getThrottlingAccepts(Criticality criticality) {
+    cleanHistory(DateTime.now());
+    return requestHistory[criticality]?.where((r) => r.accepted).length ?? 0;
+  }
+
+  /// Returns the calculated rejection probability for that criticality.
+  double getThrottlingRejectionProbability(Criticality criticality) {
+    cleanHistory(DateTime.now());
+    final requests = getThrottlingRequests(criticality);
+    if (requests == 0) return 0.0;
+    final accepts = getThrottlingAccepts(criticality);
+    final k = config.throttling.k;
+    return max(0.0, (requests - k * accepts) / (requests + 1));
   }
 }
 

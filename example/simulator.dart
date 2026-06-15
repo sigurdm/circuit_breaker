@@ -441,13 +441,6 @@ void handleKey(String key) {
   }
 }
 
-double calculateRejectionProbability(List<RequestRecord>? history, double k) {
-  if (history == null || history.isEmpty) return 0.0;
-  final requests = history.length;
-  final accepts = history.where((r) => r.accepted).length;
-  return max(0.0, (requests - k * accepts) / (requests + 1));
-}
-
 void drawUI() {
   final critPlusRolling = statsTracker.getRollingStats(
     Criticality.criticalPlus,
@@ -643,19 +636,17 @@ void drawUI() {
 
   String winReqStr(Criticality c) {
     if (resState == null) return '0';
-    return '${resState.requestHistory[c]?.length ?? 0}';
+    return '${resState.getThrottlingRequests(c)}';
   }
 
   String winAccStr(Criticality c) {
     if (resState == null) return '0';
-    return '${resState.requestHistory[c]?.where((r) => r.accepted).length ?? 0}';
+    return '${resState.getThrottlingAccepts(c)}';
   }
 
   String rejProbStr(Criticality c) {
     if (resState == null) return '0.0%';
-    final history = resState.requestHistory[c];
-    final k = resState.config.throttling.k;
-    final p = calculateRejectionProbability(history, k);
+    final p = resState.getThrottlingRejectionProbability(c);
     return '${(p * 100).toStringAsFixed(1)}%';
   }
 
@@ -732,9 +723,9 @@ void drawUI() {
 
   String retryBudgetLine = 'Retry Budget:      ';
   if (resState != null) {
-    final budgetRequests = resState.retryHistory.length;
-    final budgetRetries = resState.retryHistory.where((r) => r.isRetry).length;
-    final ratio = budgetRequests > 0 ? (budgetRetries / budgetRequests) : 0.0;
+    final budgetRequests = resState.getRetryBudgetRequests();
+    final budgetRetries = resState.getRetryBudgetRetries();
+    final ratio = resState.getRetryBudgetRatio();
     final limit = resState.config.retry.retryBudgetRatio;
 
     retryBudgetLine +=
