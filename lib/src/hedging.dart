@@ -14,13 +14,39 @@ Future<T> executeWithHedging<T>(
     return await operation(Completer<void>());
   }
 
+  state.recordLogicalRequest();
+
   final c1 = Completer<void>();
   final c2 = Completer<void>();
 
+  final stopwatch = Stopwatch()..start();
   final f1 = operation(c1);
 
+  final rawV = state.dynamicDelayEstimate;
+  final actualHedgingDelay = hedgingConfig.dynamicPercentile != null
+      ? Duration(
+          microseconds: (rawV.inMicroseconds * hedgingConfig.delayMultiplier)
+              .round(),
+        )
+      : hedgingConfig.delay;
+
+  bool sampleRegistered = false;
+
+  void registerSample({required bool isSlow}) {
+    if (sampleRegistered) return;
+    sampleRegistered = true;
+    state.recordHedgingSample(isSlow: isSlow);
+  }
+
+  Timer? earlyRegTimer;
+  if (hedgingConfig.dynamicPercentile != null) {
+    earlyRegTimer = Timer(rawV, () {
+      registerSample(isSlow: true);
+    });
+  }
+
   final delayCompleter = Completer<void>();
-  final timer = Timer(hedgingConfig.delay, () {
+  final hedgingTimer = Timer(actualHedgingDelay, () {
     if (!delayCompleter.isCompleted) delayCompleter.complete();
   });
 
@@ -35,27 +61,52 @@ Future<T> executeWithHedging<T>(
         if (!delayCompleter.isCompleted) delayCompleter.complete();
       });
 
-  // Wait until f1 completes or the hedging delay expires
   await delayCompleter.future;
-  timer.cancel();
+  hedgingTimer.cancel();
 
   if (f1Done) {
-    return await f1; // Return f1 result directly
+    earlyRegTimer?.cancel();
+    final elapsed = stopwatch.elapsed;
+    registerSample(isSlow: elapsed > rawV);
+    return await f1;
   }
 
-  // Timer expired and f1 is not done. Start the hedged request.
-  final f2 = operation(c2);
+  registerSample(isSlow: true);
+  earlyRegTimer?.cancel();
+
+  bool startedHedge = false;
+  Future<T>? f2;
+  if (state.tryStartHedge()) {
+    startedHedge = true;
+    f2 = operation(c2);
+  }
+
+  if (!startedHedge) {
+    // Blocked by token bucket or concurrency limit.
+    // We still wait for the primary request to finish.
+    return await f1;
+  }
 
   final resultCompleter = Completer<T>();
   int failures = 0;
   Object? lastError;
 
-  void handleResult(Future<T> source, Completer<void> otherCancel) {
+  void handleResult(
+    Future<T> source,
+    Completer<void> otherCancel, {
+    required bool isHedge,
+    required Duration startTime,
+  }) {
     source
         .then((value) {
           if (!resultCompleter.isCompleted) {
-            if (!otherCancel.isCompleted)
-              otherCancel.complete(); // Signal cancellation
+            final elapsed = stopwatch.elapsed;
+            final latency = elapsed - startTime;
+            registerSample(isSlow: latency > rawV);
+
+            if (!otherCancel.isCompleted) {
+              otherCancel.complete();
+            }
             resultCompleter.complete(value);
           }
         })
@@ -65,11 +116,16 @@ Future<T> executeWithHedging<T>(
           if (failures == 2 && !resultCompleter.isCompleted) {
             resultCompleter.completeError(lastError!);
           }
+        })
+        .whenComplete(() {
+          if (isHedge) {
+            state.hedgeCompleted();
+          }
         });
   }
 
-  handleResult(f1, c2);
-  handleResult(f2, c1);
+  handleResult(f1, c2, isHedge: false, startTime: Duration.zero);
+  handleResult(f2!, c1, isHedge: true, startTime: actualHedgingDelay);
 
   return resultCompleter.future;
 }
