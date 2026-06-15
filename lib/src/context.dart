@@ -18,7 +18,7 @@ import 'exceptions.dart';
 /// Example:
 /// ```dart
 /// final config = ResourceConfig(
-///   circuitBreaker: CircuitBreakerConfig(failureThreshold: 3),
+///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
 ///   retry: RetryConfig(maxAttempts: 5),
 ///   hedging: HedgingConfig(enabled: true, delay: Duration(milliseconds: 200)),
 /// );
@@ -140,13 +140,13 @@ class Operation {
 /// Example:
 /// ```dart
 /// final cbConfig = CircuitBreakerConfig(
-///   failureThreshold: 5, // Trip after 5 consecutive failures
+///   consecutiveFailuresThreshold: 5, // Trip after 5 consecutive failures
 ///   resetTimeout: Duration(seconds: 30), // Wait 30s before trying again
 /// );
 /// ```
 class CircuitBreakerConfig {
   /// The number of consecutive failures allowed before the circuit trips to Open.
-  final int failureThreshold;
+  final int consecutiveFailuresThreshold;
 
   /// The duration to wait in Open state before transitioning to Half-Open
   /// to test the service again.
@@ -154,7 +154,7 @@ class CircuitBreakerConfig {
 
   /// Creates a [CircuitBreakerConfig].
   const CircuitBreakerConfig({
-    this.failureThreshold = 5,
+    this.consecutiveFailuresThreshold = 5,
     this.resetTimeout = const Duration(seconds: 30),
   });
 }
@@ -298,7 +298,7 @@ class HedgingConfig {
 ///
 /// // Configure specific resource
 /// context.configure('users-api', ResourceConfig(
-///   circuitBreaker: CircuitBreakerConfig(failureThreshold: 3),
+///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
 /// ));
 ///
 /// // Execute operation

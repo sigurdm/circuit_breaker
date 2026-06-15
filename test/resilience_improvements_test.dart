@@ -20,7 +20,9 @@ void main() {
           resource = Resource(
             'timeout-service',
             config: const ResourceConfig(
-              circuitBreaker: CircuitBreakerConfig(failureThreshold: 2),
+              circuitBreaker: CircuitBreakerConfig(
+                consecutiveFailuresThreshold: 2,
+              ),
               throttling: ThrottlingConfig(k: 100.0),
               timeout: Duration(milliseconds: 50),
             ),
@@ -83,7 +85,9 @@ void main() {
         resource = Resource(
           'classifier-service',
           config: ResourceConfig(
-            circuitBreaker: const CircuitBreakerConfig(failureThreshold: 2),
+            circuitBreaker: const CircuitBreakerConfig(
+              consecutiveFailuresThreshold: 2,
+            ),
             throttling: const ThrottlingConfig(
               k: 100.0,
             ), // Prevent throttling from interfering
@@ -110,7 +114,9 @@ void main() {
         resource = Resource(
           'classifier-service-2',
           config: ResourceConfig(
-            circuitBreaker: const CircuitBreakerConfig(failureThreshold: 2),
+            circuitBreaker: const CircuitBreakerConfig(
+              consecutiveFailuresThreshold: 2,
+            ),
             throttling: const ThrottlingConfig(
               k: 100.0,
             ), // Prevent throttling from interfering
@@ -249,7 +255,7 @@ void main() {
       test('defaultConfig creates default config', () {
         final config = ResourceConfig.defaultConfig();
         expect(config.timeout, isNull);
-        expect(config.circuitBreaker.failureThreshold, equals(5));
+        expect(config.circuitBreaker.consecutiveFailuresThreshold, equals(5));
       });
     });
 
@@ -382,7 +388,9 @@ void main() {
         resource = Resource(
           'cb-vs-throttling',
           config: const ResourceConfig(
-            circuitBreaker: CircuitBreakerConfig(failureThreshold: 2),
+            circuitBreaker: CircuitBreakerConfig(
+              consecutiveFailuresThreshold: 2,
+            ),
             throttling: ThrottlingConfig(k: -1.0), // Force throttling
           ),
         );
@@ -415,7 +423,7 @@ void main() {
             'half-open-bypass',
             config: const ResourceConfig(
               circuitBreaker: CircuitBreakerConfig(
-                failureThreshold: 2,
+                consecutiveFailuresThreshold: 2,
                 resetTimeout: Duration(milliseconds: 50),
               ),
               throttling: ThrottlingConfig(k: -1.0), // Force throttling

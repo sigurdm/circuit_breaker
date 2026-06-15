@@ -41,7 +41,7 @@ void main() async {
     config: ResourceConfig(
       // 1. Circuit Breaker: Trip after 3 consecutive failures, retry after 2 seconds
       circuitBreaker: const CircuitBreakerConfig(
-        failureThreshold: 3,
+        consecutiveFailuresThreshold: 3,
         resetTimeout: Duration(seconds: 2),
       ),
       // 2. Adaptive Throttling: Aggressive K=1.5 to show throttling quickly

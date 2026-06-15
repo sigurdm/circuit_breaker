@@ -14,7 +14,7 @@ void main() {
       resource = const Resource(
         'my-service',
         config: ResourceConfig(
-          circuitBreaker: CircuitBreakerConfig(failureThreshold: 2),
+          circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 2),
           throttling: ThrottlingConfig(
             k: 100.0,
           ), // Prevent throttling from interfering

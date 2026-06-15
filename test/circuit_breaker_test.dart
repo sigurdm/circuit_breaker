@@ -11,7 +11,7 @@ void main() {
     setUp(() {
       config = const ResourceConfig(
         circuitBreaker: CircuitBreakerConfig(
-          failureThreshold: 2,
+          consecutiveFailuresThreshold: 2,
           resetTimeout: Duration(milliseconds: 100),
         ),
       );

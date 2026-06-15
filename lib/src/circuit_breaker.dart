@@ -52,7 +52,7 @@ class CircuitBreaker {
 
     if (state.circuitState == CircuitState.halfOpen) {
       state.circuitState = CircuitState.open;
-    } else if (state.failureCount >= cbConfig.failureThreshold) {
+    } else if (state.failureCount >= cbConfig.consecutiveFailuresThreshold) {
       state.circuitState = CircuitState.open;
     }
   }

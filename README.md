@@ -56,7 +56,7 @@ void main() async {
   final myService = Resource(
     'my-service',
     config: const ResourceConfig(
-      circuitBreaker: CircuitBreakerConfig(failureThreshold: 5),
+      circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
       throttling: ThrottlingConfig(k: 2.0),
       timeout: Duration(seconds: 5),
     ),
@@ -162,7 +162,7 @@ To maintain accurate health metrics:
 
 ### Configuration Rules of Thumb
 
-*   **Circuit Breaker `failureThreshold`** must be set to **at least `maxAttempts + 2`** (e.g., if max retry attempts is 3, set CB threshold to 5). Otherwise, a single request exhausting its retries will trip the circuit breaker for all other traffic.
+*   **Circuit Breaker `consecutiveFailuresThreshold`** must be set to **at least `maxAttempts + 2`** (e.g., if max retry attempts is 3, set CB threshold to 5). Otherwise, a single request exhausting its retries will trip the circuit breaker for all other traffic.
 *   **Hedging `delay`** should be set to the **P90 or P95 latency** of the target service under normal load. This ensures you only duplicate the slowest 5% of requests.
 *   **Adaptive Throttling `k`** (multiplier) should default to **`2.0`** (allows the backend to fail up to 50% of requests before client-side throttling kicks in). Lower it (e.g. `1.5`) to protect fragile backends more aggressively.
 
