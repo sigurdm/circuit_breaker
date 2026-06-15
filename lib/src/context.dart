@@ -318,9 +318,11 @@ class ResilienceContext {
 
   /// Gets or creates the state for a specific resource.
   ResourceState _getState(Resource resource) {
-    return _states.putIfAbsent(resource.name, () {
+    final state = _states.putIfAbsent(resource.name, () {
       return ResourceState(resource.config);
     });
+    state.config = resource.config;
+    return state;
   }
 
   /// Executes an operation with the configured resilience policies.
@@ -425,8 +427,10 @@ class ResilienceContext {
             circuitBreaker.recordSuccess();
             state.recordRequest(true, operation.criticality);
           }
+          rethrow;
+        } else {
+          throw const _OperationCancelledException();
         }
-        rethrow;
       }
     }
 
@@ -438,7 +442,10 @@ class ResilienceContext {
       ),
       config: execConfig,
       state: state,
-      retryOn: retryOn,
+      retryOn: (e) {
+        if (e is _OperationCancelledException) return false;
+        return retryOn?.call(e) ?? true;
+      },
     );
 
     if (execConfig.timeout != null) {
@@ -477,7 +484,7 @@ class ResilienceContext {
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
 class ResourceState {
-  final ResourceConfig config;
+  ResourceConfig config;
 
   // Circuit Breaker State
   int failureCount = 0;
@@ -535,4 +542,8 @@ final class RetryAttemptRecord {
 
   /// Creates a [RetryAttemptRecord].
   const RetryAttemptRecord(this.timestamp, {required this.isRetry});
+}
+
+class _OperationCancelledException implements Exception {
+  const _OperationCancelledException();
 }

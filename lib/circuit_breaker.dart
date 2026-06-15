@@ -28,7 +28,9 @@ export 'src/context.dart'
         CircuitBreakerConfig,
         RetryConfig,
         ThrottlingConfig,
-        HedgingConfig;
+        HedgingConfig,
+        CircuitState,
+        ResourceState;
 
 export 'src/throttling.dart' show ThrottledException;
 export 'src/exceptions.dart'

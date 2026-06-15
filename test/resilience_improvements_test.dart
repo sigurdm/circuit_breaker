@@ -551,5 +551,122 @@ void main() {
         );
       });
     });
+
+    group('Simulator Integration Fixes', () {
+      test(
+        'ResourceState.config is updated dynamically in _getState',
+        () async {
+          final initialConfig = const ResourceConfig(
+            throttling: ThrottlingConfig(windowDuration: Duration(seconds: 1)),
+          );
+          final initialResource = Resource(
+            'dynamic-config-service',
+            config: initialConfig,
+          );
+
+          // Triggers creation of state with initial config
+          await context.execute(
+            Operation('call', initialResource),
+            () async => 'success',
+          );
+
+          final state = context.states[initialResource.name]!;
+          expect(
+            state.config.throttling.windowDuration,
+            equals(Duration(seconds: 1)),
+          );
+
+          // Now use a new Resource object with different config
+          final newConfig = const ResourceConfig(
+            throttling: ThrottlingConfig(windowDuration: Duration(seconds: 5)),
+          );
+          final newResource = Resource(
+            'dynamic-config-service',
+            config: newConfig,
+          );
+
+          // This should trigger _getState and update the config in the state
+          await context.execute(
+            Operation('call', newResource),
+            () async => 'success',
+          );
+
+          expect(
+            state.config.throttling.windowDuration,
+            equals(Duration(seconds: 5)),
+          );
+        },
+      );
+
+      test('cancellation does not trigger subsequent retries', () async {
+        final resource = Resource(
+          'cancel-retry-service',
+          config: const ResourceConfig(
+            retry: RetryConfig(
+              maxAttempts: 3,
+              baseDelay: Duration(milliseconds: 10),
+            ),
+            timeout: Duration(
+              milliseconds: 25,
+            ), // Timeout before action finishes
+          ),
+        );
+        final op = Operation('call', resource);
+
+        int attempts = 0;
+        final execution = context.executeCancelable(op, (cancel) async {
+          attempts++;
+          // Wait longer than timeout
+          await Future.delayed(const Duration(milliseconds: 100));
+          if (cancel.isCompleted) {
+            throw Exception('Cancelled');
+          }
+          return 'success';
+        });
+
+        await expectLater(
+          execution,
+          throwsA(isA<ResilienceTimeoutException>()),
+        );
+
+        // Wait to ensure no background retries are running
+        await Future.delayed(const Duration(milliseconds: 150));
+
+        // If it retried, attempts would be 3 (since retry max is 3)
+        // If it did not retry, attempts should be 1
+        expect(attempts, equals(1));
+      });
+
+      test('retryOn filter is respected by ResilienceContext', () async {
+        resource = Resource(
+          'retry-on-filter-service',
+          config: const ResourceConfig(
+            retry: RetryConfig(
+              maxAttempts: 3,
+              baseDelay: Duration(milliseconds: 10),
+            ),
+          ),
+        );
+        op = Operation('call', resource);
+
+        int attempts = 0;
+        final execution = context.execute(op, () async {
+          attempts++;
+          if (attempts == 1) {
+            throw ArgumentError('retry me');
+          }
+          if (attempts == 2) {
+            throw StateError('do not retry me');
+          }
+          return 'success';
+        }, retryOn: (e) => e is ArgumentError);
+
+        await expectLater(execution, throwsA(isA<StateError>()));
+
+        // Should try once, fail with ArgumentError, retry (attempt 2),
+        // fail with StateError, which is NOT retried.
+        expect(attempts, equals(2));
+      });
+    });
   });
 }
