@@ -38,7 +38,53 @@ If a service has a 5% chance of taking >1s, hedging after 1s reduces the probabi
 > [!IMPORTANT]
 > Only use hedging for **idempotent** operations (like reads) as it causes operations to be executed multiple times.
 
+## Combining Patterns (Best Practices)
+
+When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the order of execution and how they share state is critical to prevent them from conflicting.
+
+### Recommended Execution Order
+
+The library coordinates these patterns in the following order (from outer wrapper to inner execution):
+
+1.  **Circuit Breaker (First Gate)**: Fails fast immediately if the circuit is `open`. This protects the backend and prevents CPU/resource waste on the client.
+2.  **Adaptive Throttling (Second Gate)**: Proactively drops requests probabilistically if the client detects the backend is overloaded.
+    *   *Note: Throttling is bypassed for trial requests when the Circuit Breaker is in the `halfOpen` state to ensure the trial request can reach the backend to test its health.*
+3.  **Overall Timeout**: Binds the entire operation's duration, including all retries and hedges.
+4.  **Retry Loop**: Wraps the hedging logic. This treats the speculative hedged attempts as a single "logical attempt". If both the primary and hedge requests fail, the retry loop starts a new attempt.
+5.  **Hedging**: Speculatively starts parallel attempts if the primary attempt is slow.
+6.  **Per-Attempt Timeout**: Handled by your HTTP client to bound individual network connections.
+
+```
+Client Request
+└── [Overall Timeout]
+    └── [Circuit Breaker Check]
+        └── [Adaptive Throttling] (bypassed if CB is Half-Open)
+            └── [Retry Loop]
+                └── [Hedging Loop]
+                    └── [Per-Attempt Timeout (Client HTTP)]
+                        └── Actual Call
+```
+
+### Why Retry Wraps Hedging (Not Vice Versa)
+
+Wrapping Hedging with Retry ensures that we only retry if *both* the primary request and its hedge fail.
+If Hedging wrapped Retry, starting a hedge would initiate a second parallel retry loop. During a backend slowdown, this would trigger exponential request multiplication, worsening the overload.
+
+### How Metrics Interact
+
+To maintain accurate health metrics:
+*   **Throttling & CB** record results for *every actual attempt* (including retries and individual hedges) that completes. Cancelled hedges are ignored.
+*   **Retry Budget** only counts *logical retries* initiated by the Retry loop. Speculative hedge attempts do not consume the retry budget.
+*   **CB-Blocked Requests** do not record failures in Throttling, ensuring that local fast-fails do not pollute throttling metrics.
+
+### Configuration Rules of Thumb
+
+*   **Circuit Breaker `failureThreshold`** must be set to **at least `maxAttempts + 2`** (e.g., if max retry attempts is 3, set CB threshold to 5). Otherwise, a single request exhausting its retries will trip the circuit breaker for all other traffic.
+*   **Hedging `delay`** should be set to the **P90 or P95 latency** of the target service under normal load. This ensures you only duplicate the slowest 5% of requests.
+*   **Adaptive Throttling `k`** (multiplier) should default to **`2.0`** (allows the backend to fail up to 50% of requests before client-side throttling kicks in). Lower it (e.g. `1.5`) to protect fragile backends more aggressively.
+
 ## Usage
+
 
 ### Basic Setup
 

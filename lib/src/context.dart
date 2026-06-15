@@ -378,19 +378,22 @@ class ResilienceContext {
     final throttler = AdaptiveThrottler(execConfig, state);
     final circuitBreaker = CircuitBreaker(execConfig, state);
 
-    // 1. Adaptive Throttling
-    if (throttler.shouldThrottle(operation.criticality)) {
-      state.recordRequest(false, operation.criticality);
-      throw ThrottledException('Request throttled for ${resource.name}');
-    }
-
-    // 2. Circuit Breaker
+    // 1. Circuit Breaker Check (First)
     if (!circuitBreaker.isAllowed) {
-      state.recordRequest(false, operation.criticality);
+      // DO NOT record request in throttling history when blocked by CB.
       throw CircuitBreakerOpenException(
         'Circuit breaker is open for ${resource.name}',
       );
     }
+
+    // 2. Adaptive Throttling Check (Second)
+    // Bypass throttling if the Circuit Breaker is in Half-Open state (trial request).
+    final isHalfOpen = state.circuitState == CircuitState.halfOpen;
+    if (!isHalfOpen && throttler.shouldThrottle(operation.criticality)) {
+      state.recordRequest(false, operation.criticality);
+      throw ThrottledException('Request throttled for ${resource.name}');
+    }
+
 
     final topLevelCancel = Completer<void>();
 
