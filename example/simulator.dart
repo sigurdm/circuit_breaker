@@ -22,7 +22,7 @@ final class SimulatorState {
   Duration overallTimeout = const Duration(milliseconds: 500);
 
   bool showHelp = false;
-  String lastStatusMessage = 'Simulator started. Type "help" for commands.';
+  String lastStatusMessage = 'Simulator started. Press "?" for help.';
   bool configChanged = false;
 
   Timer? breakdownTimer;
@@ -56,10 +56,36 @@ final class StatsTracker {
   final List<MetricEvent> _events = [];
   final Duration windowDuration;
 
+  // Cumulative stats since startup
+  final Map<Criticality, Stats> _cumulativeStats = {
+    Criticality.criticalPlus: Stats(),
+    Criticality.sheddable: Stats(),
+  };
+
   StatsTracker({this.windowDuration = const Duration(seconds: 5)});
 
   void record(Criticality criticality, EventType type) {
     _events.add(MetricEvent(DateTime.now(), criticality, type));
+
+    final cStats = _cumulativeStats[criticality]!;
+    switch (type) {
+      case EventType.requestStarted:
+        cStats.total++;
+      case EventType.requestSuccess:
+        cStats.success++;
+      case EventType.requestFailure:
+        cStats.failure++;
+      case EventType.requestTimeout:
+        cStats.timeout++;
+      case EventType.requestThrottled:
+        cStats.throttled++;
+      case EventType.requestBlockedCB:
+        cStats.blockedCB++;
+      case EventType.hedgeTriggered:
+        cStats.hedges++;
+      case EventType.retryTriggered:
+        cStats.retries++;
+    }
   }
 
   void _purgeOldEvents() {
@@ -67,7 +93,7 @@ final class StatsTracker {
     _events.removeWhere((e) => e.timestamp.isBefore(cutoff));
   }
 
-  Stats getStats(Criticality criticality) {
+  Stats getRollingStats(Criticality criticality) {
     _purgeOldEvents();
     final stats = Stats();
     for (final e in _events.where((e) => e.criticality == criticality)) {
@@ -91,6 +117,10 @@ final class StatsTracker {
       }
     }
     return stats;
+  }
+
+  Stats getCumulativeStats(Criticality criticality) {
+    return _cumulativeStats[criticality]!;
   }
 }
 
@@ -226,102 +256,163 @@ void setStatus(String msg) {
   state.lastStatusMessage = msg;
 }
 
-void processCommand(String line) {
-  final parts = line.trim().split(' ');
-  if (parts.isEmpty || parts[0].isEmpty) return;
+void cleanup() {
+  stdout.write('\x1B[?25h'); // Restore cursor
+  stdout.write('\x1B[?1049l'); // Exit alternative screen buffer
+  try {
+    stdin.lineMode = true;
+    stdin.echoMode = true;
+  } catch (_) {}
+}
 
-  final cmd = parts[0];
-  final args = parts.sublist(1);
+void triggerBreakdown() {
+  const duration = 5;
+  state.breakdownTimer?.cancel();
+
+  if (!state.isBreakdownActive) {
+    state.savedFailureRate = state.failureRate;
+    state.isBreakdownActive = true;
+  }
+
+  state.failureRate = 1.0;
+  setStatus('Service breakdown active for ${duration}s...');
+
+  state.breakdownTimer = Timer(const Duration(seconds: duration), () {
+    state.failureRate = state.savedFailureRate ?? 0.0;
+    state.isBreakdownActive = false;
+    state.savedFailureRate = null;
+    state.breakdownTimer = null;
+    setStatus(
+      'Service recovered (failure rate restored to ${(state.failureRate * 100).toStringAsFixed(0)}%)',
+    );
+  });
+}
+
+void handleKey(String key) {
+  if (state.showHelp && key != '?') {
+    state.showHelp = false;
+    return;
+  }
 
   try {
-    switch (cmd) {
-      case 'fail':
-        if (args.isEmpty) throw Exception('Missing value');
-        final val = double.parse(args[0]);
-        if (val < 0.0 || val > 1.0) {
-          throw Exception('Must be between 0.0 and 1.0');
-        }
+    switch (key) {
+      case 'f':
         if (state.isBreakdownActive) {
-          state.breakdownTimer?.cancel();
-          state.isBreakdownActive = false;
-          state.savedFailureRate = null;
-          state.breakdownTimer = null;
-        }
-        state.failureRate = val;
-        setStatus(
-          'Backend failure rate set to ${(val * 100).toStringAsFixed(0)}%',
-        );
-      case 'breakdown':
-        final duration = args.isEmpty ? 5 : int.tryParse(args[0]) ?? 5;
-        if (duration <= 0) throw Exception('Duration must be positive');
-
-        state.breakdownTimer?.cancel();
-
-        if (!state.isBreakdownActive) {
-          state.savedFailureRate = state.failureRate;
-          state.isBreakdownActive = true;
-        }
-
-        state.failureRate = 1.0;
-        setStatus('Service breakdown active for ${duration}s...');
-
-        state.breakdownTimer = Timer(Duration(seconds: duration), () {
-          state.failureRate = state.savedFailureRate ?? 0.0;
-          state.isBreakdownActive = false;
-          state.savedFailureRate = null;
-          state.breakdownTimer = null;
-          setStatus(
-            'Service recovered (failure rate restored to ${(state.failureRate * 100).toStringAsFixed(0)}%)',
+          state.savedFailureRate = (state.savedFailureRate! + 0.1).clamp(
+            0.0,
+            1.0,
           );
-        });
-      case 'latency':
-        if (args.isEmpty) throw Exception('Missing value');
-        final val = int.parse(args[0]);
-        if (val < 0) throw Exception('Latency must be non-negative');
-        state.latency = Duration(milliseconds: val);
-        setStatus('Backend latency set to ${val}ms');
-      case 'k':
-        if (args.isEmpty) throw Exception('Missing value');
-        final val = double.parse(args[0]);
-        if (val <= 0) throw Exception('K must be positive');
-        state.throttlingK = val;
-        state.configChanged = true;
-        setStatus('Throttling K set to $val');
-      case 'threshold':
-        if (args.isEmpty) throw Exception('Missing value');
-        final val = int.parse(args[0]);
-        if (val <= 0) throw Exception('CB threshold must be positive');
-        state.cbConsecutiveFailuresThreshold = val;
-        state.configChanged = true;
-        setStatus('CB consecutive failures threshold set to $val');
-      case 'timeout':
-        if (args.isEmpty) throw Exception('Missing value');
-        final val = int.parse(args[0]);
-        if (val <= 0) throw Exception('Timeout must be positive');
-        state.overallTimeout = Duration(milliseconds: val);
-        state.configChanged = true;
-        setStatus('Overall timeout set to ${val}ms');
-      case 'hedge':
-        if (args.isEmpty) throw Exception('Missing value');
-        if (args[0] == 'off') {
-          state.hedgingEnabled = false;
-          setStatus('Hedging disabled');
+          setStatus(
+            'Backend failure rate (target) set to ${(state.savedFailureRate! * 100).toStringAsFixed(0)}%',
+          );
         } else {
-          final val = int.parse(args[0]);
-          if (val <= 0) throw Exception('Hedging delay must be positive');
-          state.hedgingEnabled = true;
-          state.hedgingDelay = Duration(milliseconds: val);
-          setStatus('Hedging delay set to ${val}ms');
+          state.failureRate = (state.failureRate + 0.1).clamp(0.0, 1.0);
+          setStatus(
+            'Backend failure rate set to ${(state.failureRate * 100).toStringAsFixed(0)}%',
+          );
         }
+      case 'F':
+        if (state.isBreakdownActive) {
+          state.savedFailureRate = (state.savedFailureRate! - 0.1).clamp(
+            0.0,
+            1.0,
+          );
+          setStatus(
+            'Backend failure rate (target) set to ${(state.savedFailureRate! * 100).toStringAsFixed(0)}%',
+          );
+        } else {
+          state.failureRate = (state.failureRate - 0.1).clamp(0.0, 1.0);
+          setStatus(
+            'Backend failure rate set to ${(state.failureRate * 100).toStringAsFixed(0)}%',
+          );
+        }
+      case 'l':
+        state.latency = Duration(
+          milliseconds: (state.latency.inMilliseconds + 50).clamp(0, 2000),
+        );
+        setStatus('Latency set to ${state.latency.inMilliseconds}ms');
+      case 'L':
+        state.latency = Duration(
+          milliseconds: (state.latency.inMilliseconds - 50).clamp(0, 2000),
+        );
+        setStatus('Latency set to ${state.latency.inMilliseconds}ms');
+      case 'b':
+        triggerBreakdown();
+      case 'c':
+        state.cbConsecutiveFailuresThreshold =
+            (state.cbConsecutiveFailuresThreshold + 1).clamp(1, 20);
         state.configChanged = true;
-      case 'help':
-        state.showHelp = true;
-      case 'quit':
-        // Exit alternative screen buffer
-        stdout.write('\x1B[?1049l');
+        setStatus(
+          'CB threshold set to ${state.cbConsecutiveFailuresThreshold}',
+        );
+      case 'C':
+        state.cbConsecutiveFailuresThreshold =
+            (state.cbConsecutiveFailuresThreshold - 1).clamp(1, 20);
+        state.configChanged = true;
+        setStatus(
+          'CB threshold set to ${state.cbConsecutiveFailuresThreshold}',
+        );
+      case 'k':
+        state.throttlingK = (state.throttlingK + 0.5).clamp(1.0, 10.0);
+        state.configChanged = true;
+        setStatus(
+          'Throttling K set to ${state.throttlingK.toStringAsFixed(1)}',
+        );
+      case 'K':
+        state.throttlingK = (state.throttlingK - 0.5).clamp(1.0, 10.0);
+        state.configChanged = true;
+        setStatus(
+          'Throttling K set to ${state.throttlingK.toStringAsFixed(1)}',
+        );
+      case 't':
+        state.overallTimeout = Duration(
+          milliseconds: (state.overallTimeout.inMilliseconds + 50).clamp(
+            10,
+            2000,
+          ),
+        );
+        state.configChanged = true;
+        setStatus('Timeout set to ${state.overallTimeout.inMilliseconds}ms');
+      case 'T':
+        state.overallTimeout = Duration(
+          milliseconds: (state.overallTimeout.inMilliseconds - 50).clamp(
+            10,
+            2000,
+          ),
+        );
+        state.configChanged = true;
+        setStatus('Timeout set to ${state.overallTimeout.inMilliseconds}ms');
+      case 'g':
+        state.hedgingDelay = Duration(
+          milliseconds: (state.hedgingDelay.inMilliseconds + 50).clamp(
+            10,
+            2000,
+          ),
+        );
+        state.configChanged = true;
+        setStatus(
+          'Hedging delay set to ${state.hedgingDelay.inMilliseconds}ms',
+        );
+      case 'G':
+        state.hedgingDelay = Duration(
+          milliseconds: (state.hedgingDelay.inMilliseconds - 50).clamp(
+            10,
+            2000,
+          ),
+        );
+        state.configChanged = true;
+        setStatus(
+          'Hedging delay set to ${state.hedgingDelay.inMilliseconds}ms',
+        );
+      case 'h':
+        state.hedgingEnabled = !state.hedgingEnabled;
+        state.configChanged = true;
+        setStatus('Hedging ${state.hedgingEnabled ? "enabled" : "disabled"}');
+      case '?':
+        state.showHelp = !state.showHelp;
+      case 'q':
+        cleanup();
         exit(0);
-      default:
-        setStatus('Unknown command: $cmd. Type "help" for info.');
     }
   } catch (e) {
     setStatus('Error: ${e.toString().replaceAll('Exception: ', '')}');
@@ -329,8 +420,12 @@ void processCommand(String line) {
 }
 
 void drawUI() {
-  final critStats = statsTracker.getStats(Criticality.criticalPlus);
-  final shedStats = statsTracker.getStats(Criticality.sheddable);
+  final critRolling = statsTracker.getRollingStats(Criticality.criticalPlus);
+  final shedRolling = statsTracker.getRollingStats(Criticality.sheddable);
+  final critCumulative = statsTracker.getCumulativeStats(
+    Criticality.criticalPlus,
+  );
+  final shedCumulative = statsTracker.getCumulativeStats(Criticality.sheddable);
 
   final resState = context.states['api-service'];
   String cbStateStr = 'UNKNOWN';
@@ -360,7 +455,7 @@ void drawUI() {
     '================================================================================\x1B[K',
   );
   buf.writeln(
-    'Resilience Simulator Dashboard (5s window)                                      \x1B[K',
+    'Resilience Simulator Dashboard                                                  \x1B[K',
   );
   buf.writeln(
     '================================================================================\x1B[K',
@@ -377,56 +472,69 @@ void drawUI() {
   buf.writeln(
     '--------------------------------------------------------------------------------\x1B[K',
   );
+
+  final critTotalStr = '${critCumulative.total} (since start)';
+  final shedTotalStr = '${shedCumulative.total} (since start)';
   buf.writeln(
-    'Total Requests:        ${critStats.total.toString().padRight(26)}${shedStats.total}\x1B[K',
+    'Total Requests:        ${critTotalStr.padRight(26)}${shedTotalStr}\x1B[K',
   );
 
-  final critSuccRate = critStats.success / 5.0;
-  final shedSuccRate = shedStats.success / 5.0;
+  final critSuccessStr =
+      '${(critRolling.success / 5.0).toStringAsFixed(1)}/s (${critCumulative.success})';
+  final shedSuccessStr =
+      '${(shedRolling.success / 5.0).toStringAsFixed(1)}/s (${shedCumulative.success})';
   buf.writeln(
-    'Success Rate:          ${(critSuccRate).toStringAsFixed(1).padRight(5)}/s (${critStats.success})'
-            .padRight(47) +
-        '${(shedSuccRate).toStringAsFixed(1)}/s (${shedStats.success})\x1B[K',
+    'Success Rate:          ${critSuccessStr.padRight(26)}${shedSuccessStr}\x1B[K',
   );
 
-  final critFailRate = critStats.failure / 5.0;
-  final shedFailRate = shedStats.failure / 5.0;
+  final critFailStr =
+      '${(critRolling.failure / 5.0).toStringAsFixed(1)}/s (${critCumulative.failure})';
+  final shedFailStr =
+      '${(shedRolling.failure / 5.0).toStringAsFixed(1)}/s (${shedCumulative.failure})';
   buf.writeln(
-    'Failure Rate:          ${(critFailRate).toStringAsFixed(1).padRight(5)}/s (${critStats.failure})'
-            .padRight(47) +
-        '${(shedFailRate).toStringAsFixed(1)}/s (${shedStats.failure})\x1B[K',
+    'Failure Rate:          ${critFailStr.padRight(26)}${shedFailStr}\x1B[K',
   );
 
-  final critTimeoutRate = critStats.timeout / 5.0;
-  final shedTimeoutRate = shedStats.timeout / 5.0;
+  final critTimeoutStr =
+      '${(critRolling.timeout / 5.0).toStringAsFixed(1)}/s (${critCumulative.timeout})';
+  final shedTimeoutStr =
+      '${(shedRolling.timeout / 5.0).toStringAsFixed(1)}/s (${shedCumulative.timeout})';
   buf.writeln(
-    'Timeout Rate:          ${(critTimeoutRate).toStringAsFixed(1).padRight(5)}/s (${critStats.timeout})'
-            .padRight(47) +
-        '${(shedTimeoutRate).toStringAsFixed(1)}/s (${shedStats.timeout})\x1B[K',
+    'Timeout Rate:          ${critTimeoutStr.padRight(26)}${shedTimeoutStr}\x1B[K',
   );
 
-  final critThroRate = critStats.throttled / 5.0;
-  final shedThroRate = shedStats.throttled / 5.0;
+  final critThrottledStr =
+      '${(critRolling.throttled / 5.0).toStringAsFixed(1)}/s (${critCumulative.throttled})';
+  final shedThrottledStr =
+      '${(shedRolling.throttled / 5.0).toStringAsFixed(1)}/s (${shedCumulative.throttled})';
   buf.writeln(
-    'Throttled Rate:        ${(critThroRate).toStringAsFixed(1).padRight(5)}/s (${critStats.throttled})'
-            .padRight(47) +
-        '${(shedThroRate).toStringAsFixed(1)}/s (${shedStats.throttled})\x1B[K',
+    'Throttled Rate:        ${critThrottledStr.padRight(26)}${shedThrottledStr}\x1B[K',
   );
 
-  final critCBRate = critStats.blockedCB / 5.0;
-  final shedCBRate = shedStats.blockedCB / 5.0;
+  final critBlockedStr =
+      '${(critRolling.blockedCB / 5.0).toStringAsFixed(1)}/s (${critCumulative.blockedCB})';
+  final shedBlockedStr =
+      '${(shedRolling.blockedCB / 5.0).toStringAsFixed(1)}/s (${shedCumulative.blockedCB})';
   buf.writeln(
-    'CB-Blocked Rate:       ${(critCBRate).toStringAsFixed(1).padRight(5)}/s (${critStats.blockedCB})'
-            .padRight(47) +
-        '${(shedCBRate).toStringAsFixed(1)}/s (${shedStats.blockedCB})\x1B[K',
+    'CB-Blocked Rate:       ${critBlockedStr.padRight(26)}${shedBlockedStr}\x1B[K',
   );
 
+  final critHedgesStr =
+      '${(critRolling.hedges / 5.0).toStringAsFixed(1)}/s (${critCumulative.hedges})';
+  final shedHedgesStr =
+      '${(shedRolling.hedges / 5.0).toStringAsFixed(1)}/s (${shedCumulative.hedges})';
   buf.writeln(
-    'Hedges Triggered:      ${critStats.hedges.toString().padRight(26)}${shedStats.hedges}\x1B[K',
+    'Hedges Triggered:      ${critHedgesStr.padRight(26)}${shedHedgesStr}\x1B[K',
   );
+
+  final critRetriesStr =
+      '${(critRolling.retries / 5.0).toStringAsFixed(1)}/s (${critCumulative.retries})';
+  final shedRetriesStr =
+      '${(shedRolling.retries / 5.0).toStringAsFixed(1)}/s (${shedCumulative.retries})';
   buf.writeln(
-    'Retries Triggered:     ${critStats.retries.toString().padRight(26)}${shedStats.retries}\x1B[K',
+    'Retries Triggered:     ${critRetriesStr.padRight(26)}${shedRetriesStr}\x1B[K',
   );
+
   buf.writeln(
     '--------------------------------------------------------------------------------\x1B[K',
   );
@@ -434,19 +542,16 @@ void drawUI() {
       ? ' \x1B[31m[BREAKDOWN ACTIVE]\x1B[0m'
       : '';
   buf.writeln(
-    'Backend Config:        Latency: ${state.latency.inMilliseconds}ms | Failure Rate: ${(state.failureRate * 100).toStringAsFixed(0)}%$breakdownStatus\x1B[K',
+    'Backend Config:        [l/L] Latency: ${state.latency.inMilliseconds}ms | [f/F] Failure Rate: ${(state.failureRate * 100).toStringAsFixed(0)}% [b] Breakdown$breakdownStatus\x1B[K',
   );
   buf.writeln(
-    'Resilience Config:     CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
+    'Resilience Config:     [c/C] CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
   );
   buf.writeln(
-    '                       Throttling K: ${state.throttlingK}\x1B[K',
+    '                       [k/K] Throttling K: ${state.throttlingK.toStringAsFixed(1)}\x1B[K',
   );
   buf.writeln(
-    '                       Retry Max: ${state.retryMaxAttempts} | Retry Base: ${state.retryBaseDelay.inMilliseconds}ms\x1B[K',
-  );
-  buf.writeln(
-    '                       Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} | Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
+    '                       [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
   );
   buf.writeln(
     '================================================================================\x1B[K',
@@ -457,31 +562,21 @@ void drawUI() {
     buf.writeln(
       '--------------------------------------------------------------------------------\x1B[K',
     );
-    buf.writeln('Commands:\x1B[K');
+    buf.writeln('Hotkeys:\x1B[K');
     buf.writeln(
-      '  fail <0.0-1.0>      Set backend failure rate (e.g., fail 0.4)\x1B[K',
+      '  f / F  : Increase / Decrease backend failure rate by 10%\x1B[K',
     );
+    buf.writeln('  l / L  : Increase / Decrease backend latency by 50ms\x1B[K');
     buf.writeln(
-      '  breakdown <sec>     Simulate temporary breakdown (default 5s)\x1B[K',
+      '  b      : Trigger 5-second service breakdown (100% failure rate)\x1B[K',
     );
-    buf.writeln(
-      '  latency <ms>        Set backend latency (e.g., latency 150)\x1B[K',
-    );
-    buf.writeln(
-      '  k <double>          Set Throttling k parameter (e.g., k 1.5)\x1B[K',
-    );
-    buf.writeln(
-      '  threshold <int>     Set CB consecutiveFailuresThreshold (e.g., threshold 3)\x1B[K',
-    );
-    buf.writeln(
-      '  timeout <ms>        Set overall timeout in ms (e.g., timeout 300)\x1B[K',
-    );
-    buf.writeln(
-      '  hedge <ms|off>      Set hedging delay in ms, or disable it (e.g., hedge 100)\x1B[K',
-    );
-    buf.writeln('  help                Show this help overlay\x1B[K');
-    buf.writeln('  quit                Exit the simulator\x1B[K');
-    buf.writeln('  (Any key to close help)\x1B[K');
+    buf.writeln('  c / C  : Increase / Decrease CB threshold\x1B[K');
+    buf.writeln('  k / K  : Increase / Decrease Throttling K parameter\x1B[K');
+    buf.writeln('  t / T  : Increase / Decrease overall timeout\x1B[K');
+    buf.writeln('  g / G  : Increase / Decrease hedging delay\x1B[K');
+    buf.writeln('  h      : Toggle hedging enabled\x1B[K');
+    buf.writeln('  ?      : Toggle this help overlay\x1B[K');
+    buf.writeln('  q      : Quit the simulator\x1B[K');
   } else {
     for (int i = 0; i < 12; i++) {
       buf.writeln('\x1B[K');
@@ -490,6 +585,7 @@ void drawUI() {
   buf.writeln(
     '================================================================================\x1B[K',
   );
+  buf.writeln('Controls: [?] Help | [q] Quit\x1B[K');
 
   stdout.write(buf.toString());
 
@@ -500,12 +596,21 @@ void drawUI() {
 void main() async {
   // Enter alternative screen buffer
   stdout.write('\x1B[?1049h');
+  // Hide cursor
+  stdout.write('\x1B[?25l');
   // Clear screen once at start
   stdout.write('\x1B[2J\x1B[0;0H');
 
+  try {
+    stdin.lineMode = false;
+    stdin.echoMode = false;
+  } catch (_) {
+    // Might fail if not a TTY
+  }
+
   // Handle Ctrl+C to restore terminal screen buffer before exiting
   ProcessSignal.sigint.watch().listen((signal) {
-    stdout.write('\x1B[?1049l');
+    cleanup();
     exit(0);
   });
 
@@ -526,21 +631,10 @@ void main() async {
     drawUI();
   });
 
-  // Position prompt initially
-  // Dashboard height is 23 (basic) + 12 (help/blank) + 2 (borders/status) = 37 lines.
-  // Prompt at line 38.
-  stdout.write('\x1B[38;0H');
-  stdout.write('Simulator command > ');
-
-  // Listen to stdin
-  stdin.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
-    if (state.showHelp) {
-      state.showHelp = false;
+  // Listen to stdin raw
+  stdin.transform(utf8.decoder).listen((char) {
+    for (var i = 0; i < char.length; i++) {
+      handleKey(char[i]);
     }
-    processCommand(line);
-
-    // Reposition prompt and clear the line
-    stdout.write('\x1B[38;0H\x1B[K');
-    stdout.write('Simulator command > ');
   });
 }
