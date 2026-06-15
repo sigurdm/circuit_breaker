@@ -25,10 +25,13 @@ Where $K$ is the acceptance multiplier (e.g., `2.0`). If $K = 2$, the client wil
 
 ### Circuit Breaking (Failing Fast)
 
-Avoids wasting resources on a dependency that is down. The circuit breaker transitions through three states:
-*   **Closed**: Requests are allowed.
-*   **Open**: Requests fail immediately with `CircuitBreakerOpenException`.
-*   **Half-Open**: Allows a single trial request after `resetTimeout` to check if the service has recovered.
+Avoids wasting resources on a dependency that is down. Using the electrical analogy, a **closed** circuit allows traffic to flow, while an **open** circuit breaks the path, blocking all requests.
+
+The circuit breaker transitions through three states:
+*   **Closed**: Normal operation. Requests are allowed to pass through to the backend.
+*   **Open**: The backend is failing. Requests are blocked and fail immediately with `CircuitBreakerOpenException`.
+*   **Half-Open**: The reset timeout has expired. The client allows a single trial request to test if the backend has recovered.
+
 
 ### Request Hedging (Tail Latency Mitigation)
 
@@ -46,7 +49,8 @@ When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the ord
 
 The library coordinates these patterns in the following order (from outer wrapper to inner execution):
 
-1.  **Circuit Breaker (First Gate)**: Fails fast immediately if the circuit is `open`. This protects the backend and prevents CPU/resource waste on the client.
+1.  **Circuit Breaker (First Gate)**: Fails fast immediately if the circuit is `open` (broken path, requests blocked). This protects the backend and prevents CPU/resource waste on the client.
+
 2.  **Adaptive Throttling (Second Gate)**: Proactively drops requests probabilistically if the client detects the backend is overloaded.
     *   *Note: Throttling is bypassed for trial requests when the Circuit Breaker is in the `halfOpen` state to ensure the trial request can reach the backend to test its health.*
 3.  **Overall Timeout**: Binds the entire operation's duration, including all retries and hedges.
