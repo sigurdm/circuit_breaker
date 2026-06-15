@@ -30,7 +30,7 @@ Future<T> executeWithRetry<T>(
       final totalRetries = state.retryHistory.where((r) => r.isRetry).length;
 
       if (totalRequests > retryConfig.minRequestsForBudget &&
-          (totalRetries + 1) >=
+          (totalRetries + 1) >
               (totalRequests + 1) * retryConfig.retryBudgetRatio) {
         rethrow; // Budget exceeded
       }

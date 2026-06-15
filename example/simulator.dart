@@ -63,6 +63,7 @@ final class SimulatorState {
   // History for sparklines
   final List<double> successRateHistory = <double>[];
   final List<double> sheddingProbHistory = <double>[];
+  final List<double> latencyHistory = <double>[];
 
   final List<LogEvent> eventLog = [];
   CircuitState? lastObservedCBState;
@@ -88,7 +89,8 @@ final class MetricEvent {
   final DateTime timestamp;
   final Criticality criticality;
   final EventType type;
-  MetricEvent(this.timestamp, this.criticality, this.type);
+  final Duration? latency;
+  MetricEvent(this.timestamp, this.criticality, this.type, {this.latency});
 }
 
 final class LogEvent {
@@ -119,8 +121,10 @@ final class StatsTracker {
 
   StatsTracker({this.windowDuration = const Duration(seconds: 5)});
 
-  void record(Criticality criticality, EventType type) {
-    _events.add(MetricEvent(DateTime.now(), criticality, type));
+  void record(Criticality criticality, EventType type, {Duration? latency}) {
+    _events.add(
+      MetricEvent(DateTime.now(), criticality, type, latency: latency),
+    );
 
     final cStats = _cumulativeStats[criticality]!;
     switch (type) {
@@ -181,6 +185,66 @@ final class StatsTracker {
   Stats getCumulativeStats(Criticality criticality) {
     return _cumulativeStats[criticality]!;
   }
+
+  double getRollingPercentileLatencyMs(
+    Criticality criticality,
+    double percentile,
+  ) {
+    return _getRollingPercentileLatencyMs(percentile, criticality: criticality);
+  }
+
+  double getRollingAverageLatencyMs(Criticality criticality) {
+    return _getRollingAverageLatencyMs(criticality: criticality);
+  }
+
+  double getRollingPercentileLatencyMsOverall(double percentile) {
+    return _getRollingPercentileLatencyMs(percentile);
+  }
+
+  double getRollingAverageLatencyMsOverall() {
+    return _getRollingAverageLatencyMs();
+  }
+
+  double _getRollingPercentileLatencyMs(
+    double percentile, {
+    Criticality? criticality,
+  }) {
+    _purgeOldEvents();
+    final latencies = _events
+        .where(
+          (e) =>
+              e.type == EventType.requestSuccess &&
+              e.latency != null &&
+              (criticality == null || e.criticality == criticality),
+        )
+        .map((e) => e.latency!.inMicroseconds / 1000.0)
+        .toList();
+
+    if (latencies.isEmpty) return 0.0;
+    latencies.sort();
+    final index = (percentile * (latencies.length - 1)).round().clamp(
+      0,
+      latencies.length - 1,
+    );
+    return latencies[index];
+  }
+
+  double _getRollingAverageLatencyMs({Criticality? criticality}) {
+    _purgeOldEvents();
+    final latencies = _events
+        .where(
+          (e) =>
+              e.type == EventType.requestSuccess &&
+              e.latency != null &&
+              (criticality == null || e.criticality == criticality),
+        )
+        .map((e) => e.latency!.inMicroseconds / 1000.0)
+        .toList();
+
+    if (latencies.isEmpty) return 0.0;
+    final total = latencies.reduce((a, b) => a + b);
+    return total / latencies.length;
+  }
 }
 
 final class Stats {
@@ -197,13 +261,13 @@ final class Stats {
 
 // Globals removed. Used SimulatorState instead.
 
-String renderSparkline(List<double> values) {
+String renderSparkline(List<double> values, {int width = 40}) {
   const chars = [' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-  final renderValues = List<double>.filled(40, 0.0);
-  if (values.length >= 40) {
-    renderValues.setRange(0, 40, values.sublist(values.length - 40));
+  final renderValues = List<double>.filled(width, 0.0);
+  if (values.length >= width) {
+    renderValues.setRange(0, width, values.sublist(values.length - width));
   } else {
-    renderValues.setRange(40 - values.length, 40, values);
+    renderValues.setRange(width - values.length, width, values);
   }
 
   final buf = StringBuffer();
@@ -438,6 +502,7 @@ void executeRequest(Resource resource, Criticality criticality) async {
   final tracker = RequestTracker(criticality, statsTracker);
   statsTracker.record(criticality, EventType.requestStarted);
 
+  final stopwatch = Stopwatch()..start();
   try {
     await context.executeCancelable(
       Operation('op', resource, criticality: criticality),
@@ -451,17 +516,34 @@ void executeRequest(Resource resource, Criticality criticality) async {
         }
       },
     );
-    statsTracker.record(criticality, EventType.requestSuccess);
+    stopwatch.stop();
+    statsTracker.record(
+      criticality,
+      EventType.requestSuccess,
+      latency: stopwatch.elapsed,
+    );
   } on ThrottledException {
+    stopwatch.stop();
     statsTracker.record(criticality, EventType.requestThrottled);
     logEvent('[Throttled] ${criticality.name}');
   } on CircuitBreakerOpenException {
+    stopwatch.stop();
     statsTracker.record(criticality, EventType.requestBlockedCB);
   } on ResilienceTimeoutException {
-    statsTracker.record(criticality, EventType.requestTimeout);
+    stopwatch.stop();
+    statsTracker.record(
+      criticality,
+      EventType.requestTimeout,
+      latency: stopwatch.elapsed,
+    );
     logEvent('[Timeout] Request timed out');
   } catch (e) {
-    statsTracker.record(criticality, EventType.requestFailure);
+    stopwatch.stop();
+    statsTracker.record(
+      criticality,
+      EventType.requestFailure,
+      latency: stopwatch.elapsed,
+    );
   }
 }
 
@@ -564,13 +646,13 @@ void handleKey(String key) {
           'CB threshold set to ${state.cbConsecutiveFailuresThreshold}',
         );
       case 'k':
-        state.throttlingK = (state.throttlingK + 0.5).clamp(1.0, 10.0);
+        state.throttlingK = (state.throttlingK + 0.1).clamp(1.0, 10.0);
         state.configChanged = true;
         setStatus(
           'Throttling K set to ${state.throttlingK.toStringAsFixed(1)}',
         );
       case 'K':
-        state.throttlingK = (state.throttlingK - 0.5).clamp(1.0, 10.0);
+        state.throttlingK = (state.throttlingK - 0.1).clamp(1.0, 10.0);
         state.configChanged = true;
         setStatus(
           'Throttling K set to ${state.throttlingK.toStringAsFixed(1)}',
@@ -980,6 +1062,30 @@ void drawUI() {
     'Shedding Prob: ${sheddingProbStr.padLeft(6)} [${renderSparkline(state.sheddingProbHistory)}]\x1B[K',
   );
 
+  final latestLatency = state.latencyHistory.isNotEmpty
+      ? state.latencyHistory.last
+      : 0.0;
+  final rollingP95 = statsTracker.getRollingPercentileLatencyMsOverall(0.95);
+  final rollingAvg = statsTracker.getRollingAverageLatencyMsOverall();
+
+  // Normalize latency history for sparkline.
+  final maxBaseline = [
+    state.overallTimeout.inMilliseconds.toDouble(),
+    if (state.latencyHistory.isNotEmpty) ...state.latencyHistory,
+  ].reduce((a, b) => a > b ? a : b);
+
+  final normalizedLatencyHistory = state.latencyHistory
+      .map((l) => maxBaseline > 0 ? (l / maxBaseline).clamp(0.0, 1.0) : 0.0)
+      .toList();
+
+  final latencyStr = '${latestLatency.toStringAsFixed(0)}ms';
+  final p95Str = '${rollingP95.toStringAsFixed(0)}ms';
+  final avgStr = '${rollingAvg.toStringAsFixed(0)}ms';
+
+  buf.writeln(
+    'Observed Lat:  ${latencyStr.padLeft(6)} [${renderSparkline(normalizedLatencyHistory, width: 30)}] (P95: $p95Str, Avg: $avgStr)\x1B[K',
+  );
+
   // 5. CONFIGURATIONS & HOTKEYS
   buf.writeln(
     '--- CONFIGURATIONS & HOTKEYS ---------------------------------------------------\x1B[K',
@@ -1172,6 +1278,13 @@ void main() async {
     state.sheddingProbHistory.add(sheddingProb);
     if (state.sheddingProbHistory.length > 40) {
       state.sheddingProbHistory.removeAt(0);
+    }
+
+    // Latency History (overall P95)
+    final p95Latency = statsTracker.getRollingPercentileLatencyMsOverall(0.95);
+    state.latencyHistory.add(p95Latency);
+    if (state.latencyHistory.length > 40) {
+      state.latencyHistory.removeAt(0);
     }
   });
 

@@ -223,9 +223,9 @@ To protect the backend from being overwhelmed by speculative requests:
 
 When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the order of execution and how they share state is critical to prevent them from conflicting.
 
-### Recommended Execution Order
+### Execution Order
 
-The library coordinates these patterns in the following order (from outer wrapper to inner execution):
+The library automatically coordinates and enforces these patterns in the following order (from outer wrapper to inner execution):
 
 1.  **Circuit Breaker (First Gate)**: Fails fast immediately if the circuit is `open` (broken path, requests blocked). This protects the backend and prevents CPU/resource waste on the client.
 

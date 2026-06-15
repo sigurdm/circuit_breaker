@@ -365,8 +365,10 @@ final class ThrottlingConfig {
     double spread = 1.0,
     this.windowDuration = const Duration(minutes: 2),
   }) : k = (
-         criticalPlus: k * (1.0 + 3.0 * spread),
-         critical: k,
+         criticalPlus: k * (1.0 + 3.0 * spread) < 1.1
+             ? 1.1
+             : k * (1.0 + 3.0 * spread),
+         critical: k < 1.1 ? 1.1 : k,
          sheddablePlus: k * (1.0 - 0.2 * spread) < 1.1
              ? 1.1
              : k * (1.0 - 0.2 * spread),
@@ -596,14 +598,18 @@ final class HedgingConfig {
 /// ```dart
 /// final context = ResilienceContext();
 ///
-/// // Configure specific resource
-/// context.configure('users-api', ResourceConfig(
-///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
-/// ));
+/// final usersApi = Resource(
+///   'users-api',
+///   config: ResourceConfig(
+///     circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
+///   ),
+/// );
+///
+/// final getUserOp = Operation('getUser', usersApi);
 ///
 /// // Execute operation
 /// try {
-///   final user = await context.execute('users-api', (cancelSignal) async {
+///   final user = await context.execute(getUserOp, () async {
 ///     return await fetchUser(123);
 ///   });
 /// } catch (e) {

@@ -161,6 +161,14 @@ void main() {
       expect(config.k.sheddable, closeTo(1.1, 0.001));
     });
 
+    test('default constructor prevents priority inversion with low k', () {
+      final config = ThrottlingConfig(k: 1.0, spread: 1.0);
+      expect(config.k.sheddable, closeTo(1.1, 0.001));
+      expect(config.k.sheddablePlus, closeTo(1.1, 0.001));
+      expect(config.k.critical, closeTo(1.1, 0.001));
+      expect(config.k.criticalPlus, closeTo(4.0, 0.001));
+    });
+
     test('withCriticality applies exact values', () {
       const exactK = (
         criticalPlus: 5.0,

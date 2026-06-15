@@ -143,5 +143,37 @@ void main() {
 
       expect(attempts, 1); // No retries
     });
+
+    test('allows retry when it results in exactly the budget ratio', () async {
+      // Config has default budget ratio of 0.1 (10%)
+      // We want to achieve: totalRequests = 19, totalRetries = 1 at check point.
+      // If we allow retry, totalRequests becomes 20, totalRetries becomes 2.
+      // Ratio = 2/20 = 10% (exactly budget ratio).
+      //
+      // Preset history:
+      // 17 successes (isRetry: false)
+      // 1 retry (isRetry: true)
+      for (int i = 0; i < 17; i++) {
+        state.retryHistory.add(
+          RetryAttemptRecord(DateTime.now(), isRetry: false),
+        );
+      }
+      state.retryHistory.add(RetryAttemptRecord(DateTime.now(), isRetry: true));
+
+      int attempts = 0;
+      await executeWithRetry(
+        () async {
+          attempts++;
+          if (attempts == 1) {
+            throw Exception('fail');
+          }
+          return 'success';
+        },
+        config: config,
+        state: state,
+      );
+
+      expect(attempts, 2); // Should be allowed to retry
+    });
   });
 }
