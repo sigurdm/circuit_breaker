@@ -376,5 +376,172 @@ void main() {
         expect(attempts, 2);
       });
     });
+
+    group('Pattern Wrapping Order', () {
+      test('Circuit Breaker is checked before Adaptive Throttling', () async {
+        resource = Resource(
+          'cb-vs-throttling',
+          config: const ResourceConfig(
+            circuitBreaker: CircuitBreakerConfig(failureThreshold: 2),
+            throttling: ThrottlingConfig(k: -1.0), // Force throttling
+          ),
+        );
+        op = Operation('call', resource);
+
+        // Warm up / initialize state
+        await context.execute(op, () async => 'success');
+
+        final state = context.states[resource.name]!;
+
+        // Force Throttling to be active by adding a success request when k is -1.0
+        expect(state.requestHistory[op.criticality]!.length, 1);
+        expect(state.requestHistory[op.criticality]![0].accepted, true);
+
+        // Trip the Circuit Breaker manually
+        state.circuitState = CircuitState.open;
+        state.lastFailureTime = DateTime.now();
+
+        // Execution should throw CircuitBreakerOpenException, not ThrottledException
+        await expectLater(
+          context.execute(op, () async => 'success'),
+          throwsA(isA<CircuitBreakerOpenException>()),
+        );
+      });
+
+      test(
+        'Adaptive Throttling is bypassed when Circuit Breaker is Half-Open',
+        () async {
+          resource = Resource(
+            'half-open-bypass',
+            config: const ResourceConfig(
+              circuitBreaker: CircuitBreakerConfig(
+                failureThreshold: 2,
+                resetTimeout: Duration(milliseconds: 50),
+              ),
+              throttling: ThrottlingConfig(k: -1.0), // Force throttling
+            ),
+          );
+          op = Operation('call', resource);
+
+          // Warm up / initialize state
+          await context.execute(op, () async => 'success');
+
+          final state = context.states[resource.name]!;
+
+          // Force Throttling to be active
+          expect(state.requestHistory[op.criticality]!.length, 1);
+          expect(state.requestHistory[op.criticality]![0].accepted, true);
+
+          // Trip the Circuit Breaker manually
+          state.circuitState = CircuitState.open;
+          state.lastFailureTime = DateTime.now();
+
+          // Wait for reset timeout to expire
+          await Future.delayed(const Duration(milliseconds: 60));
+
+          // Next request should transition CB to half-open and bypass throttling, succeeding.
+          final result = await context.execute(op, () async => 'recovered');
+          expect(result, 'recovered');
+          expect(state.circuitState, CircuitState.closed);
+        },
+      );
+
+      test('Adaptive Throttling is checked before Retry', () async {
+        resource = Resource(
+          'throttling-vs-retry',
+          config: const ResourceConfig(
+            retry: RetryConfig(maxAttempts: 3),
+            throttling: ThrottlingConfig(k: -1.0), // Force throttling
+          ),
+        );
+        op = Operation('call', resource);
+
+        // Warm up / initialize state
+        await context.execute(op, () async => 'success');
+
+        final state = context.states[resource.name]!;
+
+        // Force Throttling to be active
+        expect(state.requestHistory[op.criticality]!.length, 1);
+        expect(state.requestHistory[op.criticality]![0].accepted, true);
+
+        int actionCalls = 0;
+        state.retryHistory.clear();
+
+        // Execution should throw ThrottledException immediately, without retrying.
+        await expectLater(
+          context.execute(op, () async {
+            actionCalls++;
+            return 'success';
+          }),
+          throwsA(isA<ThrottledException>()),
+        );
+
+        expect(actionCalls, 0, reason: 'Action should not be called');
+        expect(
+          state.retryHistory,
+          isEmpty,
+          reason: 'Retry loop should not be entered',
+        );
+      });
+
+      test('Retry wraps Hedging (entire hedging session is retried)', () async {
+        resource = Resource(
+          'retry-vs-hedging',
+          config: const ResourceConfig(
+            retry: RetryConfig(
+              maxAttempts: 2,
+              baseDelay: Duration(milliseconds: 100),
+              enableJitter: false,
+            ),
+            hedging: HedgingConfig(
+              enabled: true,
+              delay: Duration(milliseconds: 50),
+            ),
+          ),
+        );
+        op = Operation('call', resource);
+
+        final List<int> attemptStartTimes = [];
+        final stopwatch = Stopwatch()..start();
+
+        // Action takes 80ms (longer than hedging delay of 50ms) and then fails.
+        final execution = context.executeCancelable(op, (cancel) async {
+          attemptStartTimes.add(stopwatch.elapsedMilliseconds);
+          await Future.delayed(const Duration(milliseconds: 80));
+          throw Exception('fail');
+        });
+
+        await expectLater(execution, throwsA(anything));
+
+        expect(
+          attemptStartTimes.length,
+          4,
+          reason: 'Should have 2 primary attempts and 2 hedge attempts',
+        );
+
+        const int tolerance = 30; // Increase tolerance slightly for busy CI
+
+        expect(attemptStartTimes[0], lessThan(tolerance));
+        expect(
+          attemptStartTimes[1],
+          allOf(greaterThanOrEqualTo(50 - tolerance), lessThan(50 + tolerance)),
+        );
+        expect(
+          attemptStartTimes[2],
+          allOf(
+            greaterThanOrEqualTo(230 - tolerance),
+            lessThan(230 + tolerance),
+          ),
+        );
+        expect(
+          attemptStartTimes[3],
+          allOf(
+            greaterThanOrEqualTo(280 - tolerance),
+            lessThan(280 + tolerance),
+          ),
+        );
+      });
+    });
   });
 }

@@ -394,7 +394,6 @@ class ResilienceContext {
       throw ThrottledException('Request throttled for ${resource.name}');
     }
 
-
     final topLevelCancel = Completer<void>();
 
     // Wrap action to record attempt outcomes
