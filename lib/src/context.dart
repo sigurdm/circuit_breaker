@@ -235,21 +235,62 @@ class RetryConfig {
 ///   windowDuration: Duration(minutes: 2),
 /// );
 /// ```
-class ThrottlingConfig {
-  /// The acceptance multiplier (K).
+final class ThrottlingConfig {
+  /// The acceptance multiplier (K) for each criticality level.
   ///
-  /// A value of 2.0 means the client will allow the backend to fail up to
-  /// half of its requests before it begins to aggressively throttle traffic.
-  final double k;
+  /// A higher K means more tolerance for failures before throttling begins.
+  final ({
+    double criticalPlus,
+    double critical,
+    double sheddablePlus,
+    double sheddable,
+  })
+  k;
 
   /// The duration of the rolling window used to calculate success rates.
   final Duration windowDuration;
 
-  /// Creates a [ThrottlingConfig].
+  /// Creates a [ThrottlingConfig] with a base [k] and a [spread] factor.
+  ///
+  /// The effective K values for each criticality level are calculated as:
+  /// - `criticalPlus`: `k * (1.0 + 3.0 * spread)`
+  /// - `critical`: `k`
+  /// - `sheddablePlus`: `k * (1.0 - 0.2 * spread)` (min 1.1)
+  /// - `sheddable`: `k * (1.0 - 0.4 * spread)` (min 1.1)
   const ThrottlingConfig({
-    this.k = 2.0,
+    double k = 2.0,
+    double spread = 1.0,
+    this.windowDuration = const Duration(minutes: 2),
+  }) : k = (
+         criticalPlus: k * (1.0 + 3.0 * spread),
+         critical: k,
+         sheddablePlus: k * (1.0 - 0.2 * spread) < 1.1
+             ? 1.1
+             : k * (1.0 - 0.2 * spread),
+         sheddable: k * (1.0 - 0.4 * spread) < 1.1
+             ? 1.1
+             : k * (1.0 - 0.4 * spread),
+       );
+
+  /// Creates a [ThrottlingConfig] with explicit K values for each criticality.
+  const ThrottlingConfig.withCriticality({
+    required this.k,
     this.windowDuration = const Duration(minutes: 2),
   });
+
+  /// Returns the K value for the given [criticality].
+  double getK(Criticality criticality) {
+    switch (criticality) {
+      case Criticality.criticalPlus:
+        return k.criticalPlus;
+      case Criticality.critical:
+        return k.critical;
+      case Criticality.sheddablePlus:
+        return k.sheddablePlus;
+      case Criticality.sheddable:
+        return k.sheddable;
+    }
+  }
 }
 
 /// Configuration for Request Hedging (Speculative Retries).
@@ -567,8 +608,8 @@ class ResourceState {
     final requests = getThrottlingRequests(criticality);
     if (requests == 0) return 0.0;
     final accepts = getThrottlingAccepts(criticality);
-    final k = config.throttling.k;
-    return max(0.0, (requests - k * accepts) / (requests + 1));
+    final kVal = config.throttling.getK(criticality);
+    return max(0.0, (requests - kVal * accepts) / (requests + 1));
   }
 }
 

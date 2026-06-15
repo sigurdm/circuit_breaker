@@ -41,7 +41,18 @@ If a service has a 5% chance of taking >1s, hedging after 1s reduces the probabi
 > [!IMPORTANT]
 > Only use hedging for **idempotent** operations (like reads) as it causes operations to be executed multiple times.
 
+## Resource and Context Model
+
+The library models your system's dependencies using three core concepts:
+
+*   **`ResilienceContext`**: The **runtime state container**. It maintains the active state of your resilience patterns (e.g., circuit breaker status, rolling request history for throttling) for all resources. You should typically create a single, application-wide `ResilienceContext` to ensure metrics are accumulated globally.
+*   **`Resource`**: A logical **target service** or dependency (e.g., `'database'` or `'auth-service'`). It defines the identity (name) and default policies (`ResourceConfig`) for that target. Runtime state is keyed by the resource name, meaning all operations targeting the same resource share its circuit breaker and throttling metrics.
+*   **`Operation`**: A specific **action** performed on a resource (e.g., `'getUser'` or `'updateAvatar'`). Operations inherit their resource's configuration but can override settings (like enabling hedging for reads but disabling it for writes). Operations also define the `Criticality` of the call.
+
+This separation ensures that health metrics are aggregated at the service level (Resource) while allowing fine-grained policy tuning at the call level (Operation).
+
 ## Usage
+
 
 
 ### Basic Setup

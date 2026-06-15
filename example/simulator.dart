@@ -13,6 +13,26 @@ final class SimulatorState {
   double failureRate = 0.0;
   Duration latency = const Duration(milliseconds: 50);
 
+  // Backend Capacity Config
+  double backendCapacity = 100.0;
+  double currentBackendRps = 0.0;
+
+  double get loadFactor =>
+      backendCapacity > 0 ? currentBackendRps / backendCapacity : 0.0;
+
+  Duration get effectiveLatency {
+    if (loadFactor <= 1.0) return latency;
+    final multiplier = 1.0 + (loadFactor - 1.0) * 2.0;
+    return Duration(
+      milliseconds: (latency.inMilliseconds * multiplier).round(),
+    );
+  }
+
+  double get effectiveFailureRate {
+    if (loadFactor <= 1.0) return failureRate;
+    return (failureRate + (loadFactor - 1.0) * 0.5).clamp(0.0, 1.0);
+  }
+
   // Resilience Config
   int cbConsecutiveFailuresThreshold = 5;
   Duration cbResetTimeout = const Duration(seconds: 5);
@@ -60,6 +80,7 @@ enum EventType {
   requestBlockedCB,
   hedgeTriggered,
   retryTriggered,
+  backendAttempt,
 }
 
 final class MetricEvent {
@@ -118,6 +139,8 @@ final class StatsTracker {
         cStats.hedges++;
       case EventType.retryTriggered:
         cStats.retries++;
+      case EventType.backendAttempt:
+        cStats.backendAttempts++;
     }
   }
 
@@ -147,6 +170,8 @@ final class StatsTracker {
           stats.hedges++;
         case EventType.retryTriggered:
           stats.retries++;
+        case EventType.backendAttempt:
+          stats.backendAttempts++;
       }
     }
     return stats;
@@ -166,6 +191,7 @@ final class Stats {
   int blockedCB = 0;
   int hedges = 0;
   int retries = 0;
+  int backendAttempts = 0;
 }
 
 // Globals removed. Used SimulatorState instead.
@@ -361,7 +387,7 @@ double _nextGaussianLatency(double mean) {
 }
 
 Future<String> mockBackend(Completer<void> cancelSignal) async {
-  final mean = state.latency.inMilliseconds.toDouble();
+  final mean = state.effectiveLatency.inMilliseconds.toDouble();
   final latencyMs = _nextGaussianLatency(mean);
   final actualLatency = Duration(milliseconds: latencyMs.round());
   await waitWithCancellation(actualLatency, cancelSignal);
@@ -370,7 +396,7 @@ Future<String> mockBackend(Completer<void> cancelSignal) async {
     throw Exception('Cancelled');
   }
 
-  if (Random().nextDouble() < state.failureRate) {
+  if (Random().nextDouble() < state.effectiveFailureRate) {
     throw Exception('Backend helper error');
   }
 
@@ -415,6 +441,7 @@ void executeRequest(Resource resource, Criticality criticality) async {
       Operation('op', resource, criticality: criticality),
       (cancelCompleter) async {
         tracker.startAttempt();
+        statsTracker.record(criticality, EventType.backendAttempt);
         try {
           return await mockBackend(cancelCompleter);
         } finally {
@@ -602,6 +629,22 @@ void handleKey(String key) {
         startScenario(Scenario.latencyBrownout);
       case 'v':
         startScenario(Scenario.oscillatingFailures);
+      case 'p':
+        state.backendCapacity = (state.backendCapacity + 10.0).clamp(
+          10.0,
+          500.0,
+        );
+        setStatus(
+          'Backend capacity set to ${state.backendCapacity.toStringAsFixed(1)} RPS',
+        );
+      case 'P':
+        state.backendCapacity = (state.backendCapacity - 10.0).clamp(
+          10.0,
+          500.0,
+        );
+        setStatus(
+          'Backend capacity set to ${state.backendCapacity.toStringAsFixed(1)} RPS',
+        );
       case 'q':
         cleanup();
         exit(0);
@@ -933,16 +976,36 @@ void drawUI() {
       ? '\x1B[31m[b] Breakdown (5s)\x1B[0m'
       : '[b] Breakdown (5s)';
   buf.writeln(
-    'Backend:    [l/L] Latency: ${state.latency.inMilliseconds}ms | [f/F] Fail Rate: ${(state.failureRate * 100).toStringAsFixed(0)}% | $breakdownOpt\x1B[K',
+    'Backend:    [l/L] Base Lat: ${state.latency.inMilliseconds}ms | [f/F] Base Fail: ${(state.failureRate * 100).toStringAsFixed(0)}% | $breakdownOpt\x1B[K',
   );
   buf.writeln(
-    'Resilience: [c/C] CB Threshold: ${state.cbConsecutiveFailuresThreshold} | CB Reset: ${state.cbResetTimeout.inSeconds}s\x1B[K',
+    '            [p/P] Cap: ${state.backendCapacity.toStringAsFixed(0)} | RPS: ${state.currentBackendRps.toStringAsFixed(1)} (${(state.loadFactor * 100).toStringAsFixed(0)}%) | Lat: ${state.effectiveLatency.inMilliseconds}ms | Fail: ${(state.effectiveFailureRate * 100).toStringAsFixed(0)}%\x1B[K',
+  );
+  final throttlingConfig =
+      resState?.config.throttling ?? buildConfig().throttling;
+  final kShed = throttlingConfig.getK(Criticality.sheddable).toStringAsFixed(1);
+  final kShedPlus = throttlingConfig
+      .getK(Criticality.sheddablePlus)
+      .toStringAsFixed(1);
+  final kCrit = throttlingConfig.getK(Criticality.critical).toStringAsFixed(1);
+  final kCritPlus = throttlingConfig
+      .getK(Criticality.criticalPlus)
+      .toStringAsFixed(1);
+
+  final cbThresh = state.cbConsecutiveFailuresThreshold;
+  final cbReset = state.cbResetTimeout.inSeconds;
+  final budgetStr = state.retryBudgetEnabled ? "ON (10%)" : "OFF";
+  buf.writeln(
+    'Resilience: [c/C] CB Thresh: $cbThresh | Reset: ${cbReset}s | [r] Budget: $budgetStr\x1B[K',
   );
   buf.writeln(
-    '            [k/K] Throttling K: ${state.throttlingK.toStringAsFixed(1)} | [r] Retry Budget: ${state.retryBudgetEnabled ? "ON (10%)" : "OFF"}\x1B[K',
+    '            [k/K] Base K: ${state.throttlingK.toStringAsFixed(1)} (Shed: $kShed, Shed+: $kShedPlus, Crit: $kCrit, Crit+: $kCritPlus)\x1B[K',
   );
+  final hedgeStr = state.hedgingEnabled
+      ? "${state.hedgingDelay.inMilliseconds}ms"
+      : "OFF";
   buf.writeln(
-    '            [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
+    '            [g/G] Hedge: $hedgeStr ([h] Toggle) | [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
   );
   buf.writeln(
     'Scenarios:  [s] Spike (5s) | [o] Brownout (15s) | [v] Oscillate (15s)\x1B[K',
@@ -1053,6 +1116,7 @@ void main() async {
   Timer.periodic(const Duration(milliseconds: 500), (timer) {
     int success = 0;
     int outcomes = 0;
+    int totalBackendAttempts = 0;
     for (final c in Criticality.values) {
       final stats = statsTracker.getRollingStats(c);
       success += stats.success;
@@ -1062,7 +1126,9 @@ void main() async {
           stats.timeout +
           stats.throttled +
           stats.blockedCB;
+      totalBackendAttempts += stats.backendAttempts;
     }
+    state.currentBackendRps = totalBackendAttempts / 5.0;
     final successRate = outcomes == 0 ? 1.0 : success / outcomes;
     state.successRateHistory.add(successRate);
     if (state.successRateHistory.length > 40) {

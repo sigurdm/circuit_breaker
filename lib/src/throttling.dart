@@ -26,7 +26,7 @@ class AdaptiveThrottler {
     final requests = history.length;
     final accepts = history.where((r) => r.accepted).length;
 
-    final k = config.throttling.k;
+    final k = config.throttling.getK(criticality);
 
     // Formula: P = max(0, (requests - K * accepts) / (requests + 1))
     final p = max(0.0, (requests - k * accepts) / (requests + 1));
