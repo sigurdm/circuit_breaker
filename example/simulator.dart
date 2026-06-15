@@ -7,6 +7,8 @@ import 'package:circuit_breaker/circuit_breaker.dart';
 
 // --- State ---
 
+enum Scenario { none, trafficSpike, latencyBrownout, oscillatingFailures }
+
 final class SimulatorState {
   double failureRate = 0.0;
   Duration latency = const Duration(milliseconds: 50);
@@ -20,6 +22,7 @@ final class SimulatorState {
   bool hedgingEnabled = true;
   Duration hedgingDelay = const Duration(milliseconds: 100);
   Duration overallTimeout = const Duration(milliseconds: 500);
+  bool retryBudgetEnabled = true;
 
   bool showHelp = false;
   String lastStatusMessage = 'Simulator started. Press "?" for help.';
@@ -28,6 +31,21 @@ final class SimulatorState {
   Timer? breakdownTimer;
   double? savedFailureRate;
   bool isBreakdownActive = false;
+
+  // Scenario State
+  String activeScenarioName = 'None';
+  int scenarioTicksRemaining = 0;
+  Scenario activeScenario = Scenario.none;
+  Duration? scenarioSavedLatency;
+  double? scenarioSavedFailureRate;
+  int scenarioTicksElapsed = 0;
+
+  // History for sparklines
+  final List<double> successRateHistory = <double>[];
+  final List<double> sheddingProbHistory = <double>[];
+
+  final List<LogEvent> eventLog = [];
+  CircuitState? lastObservedCBState;
 }
 
 final state = SimulatorState();
@@ -50,6 +68,20 @@ final class MetricEvent {
   final Criticality criticality;
   final EventType type;
   MetricEvent(this.timestamp, this.criticality, this.type);
+}
+
+final class LogEvent {
+  final DateTime timestamp;
+  final String message;
+  LogEvent(this.timestamp, this.message);
+}
+
+String _formatTimestamp(DateTime dt) {
+  final hh = dt.hour.toString().padLeft(2, '0');
+  final mm = dt.minute.toString().padLeft(2, '0');
+  final ss = dt.second.toString().padLeft(2, '0');
+  final ms = (dt.millisecond / 100).floor().toString();
+  return '$hh:$mm:$ss.$ms';
 }
 
 final class StatsTracker {
@@ -137,6 +169,133 @@ final class Stats {
   int retries = 0;
 }
 
+// Globals removed. Used SimulatorState instead.
+
+String renderSparkline(List<double> values) {
+  const chars = [' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+  final renderValues = List<double>.filled(40, 0.0);
+  if (values.length >= 40) {
+    renderValues.setRange(0, 40, values.sublist(values.length - 40));
+  } else {
+    renderValues.setRange(40 - values.length, 40, values);
+  }
+
+  final buf = StringBuffer();
+  for (final val in renderValues) {
+    final idx = (val * (chars.length - 1)).round().clamp(0, chars.length - 1);
+    buf.write(chars[idx]);
+  }
+  return buf.toString();
+}
+
+void logEvent(String message) {
+  state.eventLog.add(LogEvent(DateTime.now(), message));
+  if (state.eventLog.length > 5) {
+    state.eventLog.removeAt(0);
+  }
+}
+
+void progressScenario() {
+  if (state.activeScenario == Scenario.none) return;
+
+  state.scenarioTicksElapsed++;
+  state.scenarioTicksRemaining--;
+
+  if (state.scenarioTicksRemaining < 0) {
+    stopScenario();
+    return;
+  }
+
+  switch (state.activeScenario) {
+    case Scenario.trafficSpike:
+      break;
+    case Scenario.latencyBrownout:
+      final base = state.scenarioSavedLatency!.inMilliseconds.toDouble();
+      final target = 1000.0;
+      double current = base;
+      if (state.scenarioTicksElapsed <= 100) {
+        final t = state.scenarioTicksElapsed / 100.0;
+        current = base + (target - base) * t;
+      } else if (state.scenarioTicksElapsed <= 200) {
+        current = target;
+      } else {
+        final t = (state.scenarioTicksElapsed - 200) / 100.0;
+        current = target - (target - base) * t;
+      }
+      state.latency = Duration(milliseconds: current.round());
+      break;
+    case Scenario.oscillatingFailures:
+      final elapsed = state.scenarioTicksElapsed;
+      final period = 100.0;
+      state.failureRate = 0.5 - 0.5 * cos(2 * pi * elapsed / period);
+      break;
+    default:
+      break;
+  }
+}
+
+void startScenario(Scenario scenario) {
+  if (state.activeScenario != Scenario.none) {
+    stopScenario();
+  }
+
+  if (state.isBreakdownActive) {
+    state.breakdownTimer?.cancel();
+    state.failureRate = state.savedFailureRate ?? 0.0;
+    state.isBreakdownActive = false;
+    state.savedFailureRate = null;
+    state.breakdownTimer = null;
+  }
+
+  state.activeScenario = scenario;
+  state.scenarioTicksElapsed = 0;
+
+  switch (scenario) {
+    case Scenario.trafficSpike:
+      state.activeScenarioName = 'Traffic Spike';
+      state.scenarioTicksRemaining = 100;
+      break;
+    case Scenario.latencyBrownout:
+      state.activeScenarioName = 'Latency Brownout';
+      state.scenarioTicksRemaining = 300;
+      state.scenarioSavedLatency = state.latency;
+      break;
+    case Scenario.oscillatingFailures:
+      state.activeScenarioName = 'Oscillating Failures';
+      state.scenarioTicksRemaining = 300;
+      state.scenarioSavedFailureRate = state.failureRate;
+      break;
+    default:
+      break;
+  }
+  setStatus('Started scenario: ${state.activeScenarioName}');
+}
+
+void stopScenario() {
+  final oldScenario = state.activeScenario;
+  state.activeScenario = Scenario.none;
+  state.activeScenarioName = 'None';
+  state.scenarioTicksRemaining = 0;
+
+  switch (oldScenario) {
+    case Scenario.latencyBrownout:
+      if (state.scenarioSavedLatency != null) {
+        state.latency = state.scenarioSavedLatency!;
+      }
+      break;
+    case Scenario.oscillatingFailures:
+      if (state.scenarioSavedFailureRate != null) {
+        state.failureRate = state.scenarioSavedFailureRate!;
+      }
+      break;
+    default:
+      break;
+  }
+  state.scenarioSavedLatency = null;
+  state.scenarioSavedFailureRate = null;
+  setStatus('Scenario finished');
+}
+
 final class RequestTracker {
   final Criticality criticality;
   final StatsTracker statsTracker;
@@ -148,8 +307,10 @@ final class RequestTracker {
   void startAttempt() {
     if (activeAttempts > 0) {
       statsTracker.record(criticality, EventType.hedgeTriggered);
+      logEvent('[Hedge] Triggered');
     } else if (totalAttempts > 0) {
       statsTracker.record(criticality, EventType.retryTriggered);
+      logEvent('[Retry] Attempt ${totalAttempts + 1}');
     }
     totalAttempts++;
     activeAttempts++;
@@ -236,7 +397,7 @@ ResourceConfig buildConfig() {
       maxAttempts: state.retryMaxAttempts,
       baseDelay: state.retryBaseDelay,
       minRequestsForBudget: 0,
-      retryBudgetRatio: 1.0,
+      retryBudgetRatio: state.retryBudgetEnabled ? 0.1 : 1.0,
     ),
     hedging: HedgingConfig(
       enabled: state.hedgingEnabled,
@@ -265,10 +426,12 @@ void executeRequest(Resource resource, Criticality criticality) async {
     statsTracker.record(criticality, EventType.requestSuccess);
   } on ThrottledException {
     statsTracker.record(criticality, EventType.requestThrottled);
+    logEvent('[Throttled] ${criticality.name}');
   } on CircuitBreakerOpenException {
     statsTracker.record(criticality, EventType.requestBlockedCB);
   } on ResilienceTimeoutException {
     statsTracker.record(criticality, EventType.requestTimeout);
+    logEvent('[Timeout] Request timed out');
   } catch (e) {
     statsTracker.record(criticality, EventType.requestFailure);
   }
@@ -288,6 +451,9 @@ void cleanup() {
 }
 
 void triggerBreakdown() {
+  if (state.activeScenario != Scenario.none) {
+    stopScenario();
+  }
   const duration = 5;
   state.breakdownTimer?.cancel();
 
@@ -430,6 +596,18 @@ void handleKey(String key) {
         state.hedgingEnabled = !state.hedgingEnabled;
         state.configChanged = true;
         setStatus('Hedging ${state.hedgingEnabled ? "enabled" : "disabled"}');
+      case 'r':
+        state.retryBudgetEnabled = !state.retryBudgetEnabled;
+        state.configChanged = true;
+        setStatus(
+          'Retry budget ${state.retryBudgetEnabled ? "enabled" : "disabled"}',
+        );
+      case 's':
+        startScenario(Scenario.trafficSpike);
+      case 'o':
+        startScenario(Scenario.latencyBrownout);
+      case 'v':
+        startScenario(Scenario.oscillatingFailures);
       case '?':
         state.showHelp = !state.showHelp;
       case 'q':
@@ -735,7 +913,18 @@ void drawUI() {
   }
   buf.writeln(retryBudgetLine + '\x1B[K');
 
-  // 4. CONFIGURATIONS
+  // 4. VISUAL TRENDS (last 20s)
+  buf.writeln(
+    '--- VISUAL TRENDS (last 20s) ---------------------------------------------------\x1B[K',
+  );
+  buf.writeln(
+    'Success Rate:  [${renderSparkline(state.successRateHistory)}]\x1B[K',
+  );
+  buf.writeln(
+    'Shedding Prob: [${renderSparkline(state.sheddingProbHistory)}]\x1B[K',
+  );
+
+  // 5. CONFIGURATIONS
   buf.writeln(
     '--- CONFIGURATIONS -------------------------------------------------------------\x1B[K',
   );
@@ -757,14 +946,34 @@ void drawUI() {
     '            [g/G] Hedge Delay: ${state.hedgingEnabled ? "${state.hedgingDelay.inMilliseconds}ms" : "OFF"} ([h] Toggle)\x1B[K',
   );
   buf.writeln(
-    '            [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms\x1B[K',
+    '            [t/T] Timeout: ${state.overallTimeout.inMilliseconds}ms | [r] Retry Budget: ${state.retryBudgetEnabled ? "ON (10%)" : "OFF (100% - STORM RISK)"}\x1B[K',
   );
 
-  // 5. STATUS & CONTROLS
+  // 6. STATUS & SCENARIO
   buf.writeln(
     '================================================================================\x1B[K',
   );
+  String scenarioLine = 'Scenario:          ${state.activeScenarioName}';
+  if (state.activeScenario != Scenario.none) {
+    final remainingSecs = state.scenarioTicksRemaining * 0.05;
+    scenarioLine += ' (${remainingSecs.toStringAsFixed(1)}s remaining)';
+  }
+  buf.writeln(scenarioLine + '\x1B[K');
   buf.writeln('Status: ${state.lastStatusMessage}\x1B[K');
+
+  // 7. LIVE EVENT LOG (last 5)
+  buf.writeln(
+    '--- LIVE EVENT LOG (last 5) ----------------------------------------------------\x1B[K',
+  );
+  for (int i = 0; i < 5; i++) {
+    if (i < state.eventLog.length) {
+      final event = state.eventLog[i];
+      final ts = _formatTimestamp(event.timestamp);
+      buf.writeln('[$ts] ${event.message}\x1B[K');
+    } else {
+      buf.writeln('\x1B[K');
+    }
+  }
 
   if (state.showHelp) {
     buf.writeln(
@@ -783,10 +992,14 @@ void drawUI() {
     buf.writeln('  t / T  : Increase / Decrease overall timeout\x1B[K');
     buf.writeln('  g / G  : Increase / Decrease hedging delay\x1B[K');
     buf.writeln('  h      : Toggle hedging enabled\x1B[K');
+    buf.writeln('  r      : Toggle retry budget\x1B[K');
+    buf.writeln('  s      : Trigger Traffic Spike scenario (5s)\x1B[K');
+    buf.writeln('  o      : Trigger Latency Brownout scenario (15s)\x1B[K');
+    buf.writeln('  v      : Trigger Oscillating Failures scenario (15s)\x1B[K');
     buf.writeln('  ?      : Toggle this help overlay\x1B[K');
     buf.writeln('  q      : Quit the simulator\x1B[K');
   } else {
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 16; i++) {
       buf.writeln('\x1B[K');
     }
   }
@@ -830,10 +1043,66 @@ void main() async {
       resource = Resource('api-service', config: buildConfig());
       state.configChanged = false;
     }
-    executeRequest(resource, Criticality.criticalPlus);
-    executeRequest(resource, Criticality.critical);
-    executeRequest(resource, Criticality.sheddablePlus);
-    executeRequest(resource, Criticality.sheddable);
+
+    progressScenario();
+
+    final resState = context.states['api-service'];
+    if (resState != null) {
+      final currentCBState = resState.circuitState;
+      if (state.lastObservedCBState != currentCBState) {
+        if (state.lastObservedCBState != null) {
+          String stateStr;
+          switch (currentCBState) {
+            case CircuitState.closed:
+              stateStr = 'CLOSED';
+              break;
+            case CircuitState.open:
+              stateStr = 'OPEN';
+              break;
+            case CircuitState.halfOpen:
+              stateStr = 'HALF-OPEN';
+              break;
+          }
+          logEvent('[CB Tripped] -> $stateStr');
+        }
+        state.lastObservedCBState = currentCBState;
+      }
+    }
+
+    final requestCount = state.activeScenario == Scenario.trafficSpike ? 5 : 1;
+    for (var i = 0; i < requestCount; i++) {
+      executeRequest(resource, Criticality.criticalPlus);
+      executeRequest(resource, Criticality.critical);
+      executeRequest(resource, Criticality.sheddablePlus);
+      executeRequest(resource, Criticality.sheddable);
+    }
+  });
+
+  // Metrics Sampler: every 500ms
+  Timer.periodic(const Duration(milliseconds: 500), (timer) {
+    // Success Rate
+    int total = 0;
+    int success = 0;
+    for (final c in Criticality.values) {
+      final stats = statsTracker.getRollingStats(c);
+      total += stats.total;
+      success += stats.success;
+    }
+    final successRate = total == 0 ? 1.0 : success / total;
+    state.successRateHistory.add(successRate);
+    if (state.successRateHistory.length > 40) {
+      state.successRateHistory.removeAt(0);
+    }
+
+    // Shedding Probability
+    final resState = context.states['api-service'];
+    final sheddingProb =
+        resState?.getThrottlingRejectionProbability(Criticality.sheddable) ??
+        0.0;
+    state.sheddingProbHistory.add(sheddingProb);
+    if (state.sheddingProbHistory.length > 40) {
+      state.sheddingProbHistory.removeAt(0);
+    }
   });
 
   // UI Redraw: every 200ms
