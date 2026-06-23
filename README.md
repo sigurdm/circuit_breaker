@@ -8,7 +8,7 @@ A resilience library for Dart applications implementing patterns for distributed
 *   **Adaptive Throttling**: Client-side throttling to protect backends from overload (Google SRE book, Chapter 21).
 *   **Request Hedging**: Speculative parallel requests to mitigate tail latency (The Tail at Scale).
 *   **Retry Budgets**: Rolling window budget to prevent client-induced retry storms.
-*   **Execution Timeouts**: Integrated timeouts that propagate cancellation to active hedges.
+*   **Deadline & Cancellation Propagation**: Context-aware timeout and cancellation sharing across call chains to prevent zombie requests.
 *   **Failure Classification**: Distinguish application-level errors from system failures.
 *   **Hierarchical Configuration**: Share state across resources while overriding settings for specific operations.
 *   **Criticality Awareness**: Prioritize traffic and throttle less critical requests first.
@@ -64,6 +64,14 @@ The library supports two modes of hedging:
 
 > [!IMPORTANT]
 > Only use hedging for **idempotent** operations (like reads) as it causes operations to be executed multiple times.
+
+### Deadline & Cancellation Propagation (Zombie Request Prevention)
+
+In distributed systems, a request often traverses a chain of services (A -> B -> C). If a client cancels the request or a timeout is reached early in the chain, downstream services might continue expending resources on work that has already been abandoned. These are known as "zombie requests."
+
+To address this, the library supports **Deadline** and **Cancellation Propagation** via Dart `Zone`s:
+*   **Deadline Propagation**: Passes the absolute point in time by which a request must complete downstream. If a child operation is started, it automatically inherits the parent's deadline (choosing the earliest of parent vs. child timeout). If the deadline is reached, the operation fails fast with a `ResilienceTimeoutException`.
+*   **Cancellation Propagation**: Propagates cancellation signals downstream. If a parent operation is cancelled (e.g. by the client or because a faster hedge completed), all active downstream operations in the same zone are notified via a `CancellationToken` and aborted with an `OperationCancelledException`.
 
 ## Resource and Context Model
 
@@ -267,6 +275,51 @@ Despite the benefits of dynamic hedging, static hedging is preferred in several 
 *   **Strict SLAs**: When you have a hard guarantee (e.g., "always hedge if the request takes longer than 50ms"), static hedging ensures this limit is strictly enforced, whereas dynamic hedging might adapt to a higher delay during backend degradation.
 *   **Deterministic Latency**: If the target service has a highly predictable and stable latency profile that rarely changes, static hedging provides the same benefits as dynamic hedging with less complexity.
 *   **Simplicity and Debuggability**: Static hedging is easier to reason about, configure, and debug, as the hedging decision is entirely deterministic and based on a single fixed parameter.
+
+### Deadline and Cancellation Propagation
+
+You can use the static methods on `ResilienceContext` to propagate deadlines and cancellation tokens down your call chain.
+
+#### Implicit Propagation
+
+Child operations executed within the context of a parent operation automatically inherit the parent's deadline and cancellation token:
+
+```dart
+final context = ResilienceContext();
+
+final myService = Resource('my-service', config: ResourceConfig(
+  timeout: Duration(milliseconds: 500), // Parent timeout
+));
+
+await context.executeCancelable(Operation('parent', myService), (cancel) async {
+  // Child operation automatically inherits the 500ms deadline
+  await context.executeCancelable(Operation('child', myService), (childCancel) async {
+    final childDeadline = ResilienceContext.currentDeadline; // Same as parent deadline
+    final remainingTime = childDeadline?.difference(DateTime.now()) ?? Duration(seconds: 1);
+    
+    // Pass the remaining timeout to your HTTP client
+    await httpClient.get('/api/data', timeout: remainingTime); 
+  });
+});
+```
+
+#### Explicit Zone Entry
+
+To start a call chain with an external deadline or token (e.g., extracted from incoming HTTP headers in a server):
+
+```dart
+final incomingDeadline = DateTime.parse(request.headers['X-Server-Deadline']!);
+final parentToken = CancellationToken(); // Can be linked to client connection close
+
+await ResilienceContext.runWithDeadline(incomingDeadline, () {
+  return ResilienceContext.runWithCancellationToken(parentToken, () async {
+    // Any operations executed here will respect the incoming deadline and parent token
+    await context.execute(Operation('db-read', dbResource), () async {
+       return await db.read();
+    });
+  });
+});
+```
 
 ## Combining Patterns (Best Practices)
 
