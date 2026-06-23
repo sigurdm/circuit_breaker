@@ -1066,6 +1066,7 @@ void drawUI() {
       ? state.latencyHistory.last
       : 0.0;
   final rollingP95 = statsTracker.getRollingPercentileLatencyMsOverall(0.95);
+  final rollingP99 = statsTracker.getRollingPercentileLatencyMsOverall(0.99);
   final rollingAvg = statsTracker.getRollingAverageLatencyMsOverall();
 
   // Normalize latency history for sparkline.
@@ -1080,10 +1081,11 @@ void drawUI() {
 
   final latencyStr = '${latestLatency.toStringAsFixed(0)}ms';
   final p95Str = '${rollingP95.toStringAsFixed(0)}ms';
+  final p99Str = '${rollingP99.toStringAsFixed(0)}ms';
   final avgStr = '${rollingAvg.toStringAsFixed(0)}ms';
 
   buf.writeln(
-    'Observed Lat:  ${latencyStr.padLeft(6)} [${renderSparkline(normalizedLatencyHistory, width: 30)}] (P95: $p95Str, Avg: $avgStr)\x1B[K',
+    'Observed Lat:  ${latencyStr.padLeft(6)} [${renderSparkline(normalizedLatencyHistory, width: 20)}] (P95: $p95Str, P99: $p99Str, Avg: $avgStr)\x1B[K',
   );
 
   // 5. CONFIGURATIONS & HOTKEYS

@@ -96,6 +96,43 @@ void main() {
       },
     );
 
+    test('calculates overall percentiles correctly', () {
+      // Critical: 10, 30, 50
+      // Sheddable: 20, 40
+      // Combined: 10, 20, 30, 40, 50
+      tracker.record(
+        Criticality.critical,
+        EventType.requestSuccess,
+        latency: const Duration(milliseconds: 10),
+      );
+      tracker.record(
+        Criticality.sheddable,
+        EventType.requestSuccess,
+        latency: const Duration(milliseconds: 20),
+      );
+      tracker.record(
+        Criticality.critical,
+        EventType.requestSuccess,
+        latency: const Duration(milliseconds: 30),
+      );
+      tracker.record(
+        Criticality.sheddable,
+        EventType.requestSuccess,
+        latency: const Duration(milliseconds: 40),
+      );
+      tracker.record(
+        Criticality.critical,
+        EventType.requestSuccess,
+        latency: const Duration(milliseconds: 50),
+      );
+
+      // Overall sorted: 10, 20, 30, 40, 50. length = 5, indices 0..4
+      // P50: index = (0.5 * 4).round() = 2. Value: 30.
+      expect(tracker.getRollingPercentileLatencyMsOverall(0.5), 30.0);
+      // P99: index = (0.99 * 4).round() = 3.96.round() = 4. Value: 50.
+      expect(tracker.getRollingPercentileLatencyMsOverall(0.99), 50.0);
+    });
+
     test('only counts requestSuccess events with latency', () {
       tracker.record(
         Criticality.critical,

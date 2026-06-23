@@ -13,6 +13,16 @@ A resilience library for Dart applications implementing patterns for distributed
 *   **Hierarchical Configuration**: Share state across resources while overriding settings for specific operations.
 *   **Criticality Awareness**: Prioritize traffic and throttle less critical requests first.
 
+## Interactive Simulator
+
+The repository includes an interactive terminal dashboard simulator that lets you visualize and experiment with these resilience patterns under backend overload, slowness, and failures in real-time.
+
+```bash
+dart run example/simulator.dart
+```
+
+For more details on the simulator controls and scenarios, see the [Simulator README](file:///usr/local/google/home/sigurdm/projects/circuit_breaker/example/README.md).
+
 ## Core Concepts
 
 ### Adaptive Throttling (Retry Storm Prevention)
@@ -34,6 +44,14 @@ The circuit breaker transitions through three states:
 *   **Open**: The backend is failing. Requests are blocked and fail immediately with `CircuitBreakerOpenException`.
 *   **Half-Open**: The reset timeout has expired. The client allows a single trial request to test if the backend has recovered.
 
+### Throttling vs. Circuit Breaking: Why Use Both?
+
+While both patterns protect services from degradation, they operate at different ends of the connection and handle different failure modes:
+
+*   **Throttling (Rate Limiting)** is a **proactive, server-side** defense. It protects the *provider* from being overwhelmed by too many requests (accidental spikes or abusive clients) by rejecting excess traffic early.
+*   **Circuit Breaking** is a **reactive, client-side** defense. It protects the *consumer* from wasting resources on a downstream service that is failing (due to database issues, network partitions, bugs, or even server-side throttling), preventing cascading failures.
+
+Using throttling alone is not enough: if a downstream service is down (not just overloaded), throttling on that service cannot protect the client from hanging on timeouts. Conversely, using circuit breakers alone is not enough: a sudden massive spike in traffic can crash a server before client circuit breakers detect the failures. They are complementary patterns that work together to ensure end-to-end resilience.
 
 ### Request Hedging (Tail Latency Mitigation)
 
