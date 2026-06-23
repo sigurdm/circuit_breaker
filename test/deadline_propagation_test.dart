@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:test/test.dart';
 import 'package:circuit_breaker/circuit_breaker.dart';
 
@@ -196,5 +197,244 @@ void main() {
       final duration = DateTime.now().difference(startTime);
       expect(duration.inMilliseconds, lessThan(500));
     });
+
+    test('CancellationToken cancel can be called multiple times', () {
+      final token = CancellationToken();
+      expect(token.isCancelled, isFalse);
+      token.cancel();
+      expect(token.isCancelled, isTrue);
+      expect(() => token.cancel(), returnsNormally);
+      expect(token.isCancelled, isTrue);
+    });
+
+    test('OperationCancelledException toString contains message', () {
+      final e = const OperationCancelledException('custom message');
+      expect(
+        e.toString(),
+        contains('OperationCancelledException: custom message'),
+      );
+
+      final e2 = const OperationCancelledException();
+      expect(
+        e2.toString(),
+        contains('OperationCancelledException: Operation was cancelled'),
+      );
+    });
+
+    test('merge deadlines chooses earliest', () async {
+      final parentTimeout = const Duration(milliseconds: 100);
+      final resourceWithParentTimeout = Resource(
+        'parent-timeout',
+        config: ResourceConfig(
+          throttling: ThrottlingConfig(k: 100.0),
+          timeout: parentTimeout,
+        ),
+      );
+
+      await context.executeCancelable(
+        Operation(
+          'parent',
+          resourceWithParentTimeout,
+          retryOverride: RetryConfig(maxAttempts: 1),
+        ),
+        (cancel) async {
+          final parentDeadline = ResilienceContext.currentDeadline;
+          expect(parentDeadline, isNotNull);
+
+          final childTimeout = const Duration(milliseconds: 200);
+          final resourceWithChildTimeout = Resource(
+            'child-timeout',
+            config: ResourceConfig(
+              throttling: ThrottlingConfig(k: 100.0),
+              timeout: childTimeout,
+            ),
+          );
+
+          await context.executeCancelable(
+            Operation(
+              'child',
+              resourceWithChildTimeout,
+              retryOverride: RetryConfig(maxAttempts: 1),
+            ),
+            (childCancel) async {
+              final childDeadline = ResilienceContext.currentDeadline;
+              expect(childDeadline, equals(parentDeadline));
+            },
+          );
+        },
+      );
+
+      await context.executeCancelable(
+        Operation(
+          'parent2',
+          resourceWithParentTimeout,
+          retryOverride: RetryConfig(maxAttempts: 1),
+        ),
+        (cancel) async {
+          final parentDeadline = ResilienceContext.currentDeadline;
+          expect(parentDeadline, isNotNull);
+
+          final childTimeout = const Duration(milliseconds: 50);
+          final resourceWithChildTimeout = Resource(
+            'child-timeout-2',
+            config: ResourceConfig(
+              throttling: ThrottlingConfig(k: 100.0),
+              timeout: childTimeout,
+            ),
+          );
+
+          await context.executeCancelable(
+            Operation(
+              'child2',
+              resourceWithChildTimeout,
+              retryOverride: RetryConfig(maxAttempts: 1),
+            ),
+            (childCancel) async {
+              final childDeadline = ResilienceContext.currentDeadline;
+              expect(childDeadline!.isBefore(parentDeadline!), isTrue);
+            },
+          );
+        },
+      );
+    });
+
+    test(
+      'retry backoff aborts immediately if token already cancelled',
+      () async {
+        final resourceWithRetry = Resource(
+          'test-service-retry-cancel',
+          config: ResourceConfig(
+            throttling: ThrottlingConfig(k: 100.0),
+            retry: RetryConfig(
+              maxAttempts: 3,
+              baseDelay: const Duration(seconds: 10),
+              enableJitter: false,
+            ),
+          ),
+        );
+
+        final token = CancellationToken();
+        int actionCalls = 0;
+
+        final future = ResilienceContext.runWithCancellationToken(
+          token,
+          () => context.execute(
+            Operation('test', resourceWithRetry),
+            () async {
+              actionCalls++;
+              throw Exception('fail');
+            },
+            retryOn: (e) {
+              ResilienceContext.currentCancellationToken?.cancel();
+              return true;
+            },
+          ),
+        );
+
+        await expectLater(future, throwsA(isA<OperationCancelledException>()));
+        expect(actionCalls, equals(1));
+      },
+    );
+
+    test('deadline exceeded during execution check', () async {
+      final resource = Resource(
+        'slow-setup-service',
+        config: ResourceConfig(
+          throttling: ThrottlingConfig(k: 100.0),
+          timeout: const Duration(milliseconds: 5),
+          hedging: HedgingConfig(
+            enabled: true,
+            delay: const Duration(milliseconds: 50),
+          ),
+          retry: RetryConfig(maxAttempts: 1),
+        ),
+      );
+
+      final delayingState = DelayingResourceState(resource.config);
+      context.states[resource.name] = delayingState;
+
+      expect(
+        () =>
+            context.execute(Operation('test', resource), () async => 'success'),
+        throwsA(
+          isA<ResilienceTimeoutException>().having(
+            (e) => e.message,
+            'message',
+            contains('Deadline exceeded during execution'),
+          ),
+        ),
+      );
+    });
+
+    test('cancellation aborts hanging action even without timeout', () async {
+      final resourceWithoutTimeout = Resource(
+        'no-timeout-service',
+        config: ResourceConfig(throttling: ThrottlingConfig(k: 100.0)),
+      );
+
+      final parentToken = CancellationToken();
+
+      final future = ResilienceContext.runWithCancellationToken(
+        parentToken,
+        () => context.executeCancelable(
+          Operation('test', resourceWithoutTimeout),
+          (cancel) async {
+            await Completer<void>().future;
+            return 'success';
+          },
+        ),
+      );
+
+      Timer(const Duration(milliseconds: 10), () {
+        parentToken.cancel();
+      });
+
+      await expectLater(future, throwsA(isA<OperationCancelledException>()));
+    });
+
+    test(
+      'hedge attempt is cancelled before start if parent cancelled',
+      () async {
+        final resource = Resource(
+          'hedge-cancel-before-start',
+          config: ResourceConfig(
+            timeout: const Duration(milliseconds: 100),
+            hedging: HedgingConfig(
+              enabled: true,
+              delay: const Duration(milliseconds: 10),
+            ),
+            retry: RetryConfig(maxAttempts: 1),
+          ),
+        );
+
+        final parentToken = CancellationToken();
+
+        final future = ResilienceContext.runWithCancellationToken(
+          parentToken,
+          () => context.executeCancelable(Operation('test', resource), (
+            cancel,
+          ) async {
+            await Completer<void>().future;
+            return 'primary';
+          }),
+        );
+
+        Timer(const Duration(milliseconds: 5), () {
+          parentToken.cancel();
+        });
+
+        await expectLater(future, throwsA(isA<OperationCancelledException>()));
+      },
+    );
   });
+}
+
+class DelayingResourceState extends ResourceState {
+  DelayingResourceState(super.config);
+
+  @override
+  void recordLogicalRequest() {
+    super.recordLogicalRequest();
+    sleep(const Duration(milliseconds: 10));
+  }
 }

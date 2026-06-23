@@ -34,6 +34,11 @@ export 'src/context.dart'
         RequestRecord,
         RetryAttemptRecord;
 
+export 'src/cancellation.dart' show CancellationToken;
+
 export 'src/throttling.dart' show ThrottledException;
 export 'src/exceptions.dart'
-    show CircuitBreakerOpenException, ResilienceTimeoutException;
+    show
+        CircuitBreakerOpenException,
+        ResilienceTimeoutException,
+        OperationCancelledException;

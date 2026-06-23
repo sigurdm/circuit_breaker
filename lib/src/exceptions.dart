@@ -21,3 +21,15 @@ final class ResilienceTimeoutException implements Exception {
   @override
   String toString() => 'ResilienceTimeoutException: $message';
 }
+
+/// Exception thrown when an operation is cancelled.
+final class OperationCancelledException implements Exception {
+  /// The message describing the error.
+  final String message;
+
+  /// Creates an [OperationCancelledException].
+  const OperationCancelledException([this.message = 'Operation was cancelled']);
+
+  @override
+  String toString() => 'OperationCancelledException: $message';
+}

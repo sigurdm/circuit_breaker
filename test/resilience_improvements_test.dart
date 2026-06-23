@@ -572,7 +572,7 @@ void main() {
                 consecutiveFailuresThreshold: 2,
               ),
               retry: RetryConfig(
-                maxAttempts: 3,
+                maxAttempts: 4,
                 baseDelay: const Duration(milliseconds: 1),
                 enableJitter: false,
               ),

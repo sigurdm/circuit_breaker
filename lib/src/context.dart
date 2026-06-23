@@ -754,11 +754,11 @@ final class ResilienceContext {
     }
     // --------------------------------------
 
-    final topLevelCancel = Completer<void>();
+    final topLevelCancel = Completer<Exception>();
     unawaited(
       executionToken.onCancelled.then((_) {
         if (!topLevelCancel.isCompleted) {
-          topLevelCancel.complete();
+          topLevelCancel.complete(const OperationCancelledException());
         }
       }),
     );
@@ -848,46 +848,45 @@ final class ResilienceContext {
       },
     );
 
+    Timer? timeoutTimer;
     if (effectiveDeadline != null) {
       final remaining = effectiveDeadline.difference(DateTime.now());
-      final timer = Timer(
+      timeoutTimer = Timer(
         remaining > Duration.zero ? remaining : Duration.zero,
         () {
           if (!topLevelCancel.isCompleted) {
-            topLevelCancel.complete();
+            topLevelCancel.complete(
+              ResilienceTimeoutException(
+                'Operation timed out (deadline exceeded)',
+              ),
+            );
           }
           executionToken.cancel();
         },
       );
+    }
 
-      try {
-        final result = await Future.any([
-          executionFuture,
-          topLevelCancel.future.then(
-            (_) => throw ResilienceTimeoutException(
-              'Operation timed out (deadline exceeded)',
-            ),
-          ),
-        ]);
-        timer.cancel();
-        return result;
-      } catch (e) {
-        timer.cancel();
-        if (e is ResilienceTimeoutException) {
-          circuitBreaker.recordFailure();
-          state.recordRequest(false, operation.criticality);
-        }
-        rethrow;
+    try {
+      final result = await Future.any([
+        executionFuture,
+        topLevelCancel.future.then((e) => throw e),
+      ]);
+      timeoutTimer?.cancel();
+      return result;
+    } catch (e) {
+      timeoutTimer?.cancel();
+      if (e is ResilienceTimeoutException) {
+        circuitBreaker.recordFailure();
+        state.recordRequest(false, operation.criticality);
       }
-    } else {
-      return await executionFuture;
+      rethrow;
     }
   }
 }
 
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
-final class ResourceState {
+class ResourceState {
   /// The active configuration for the resource.
   ResourceConfig _config;
 
