@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math';
 import 'context.dart';
+import 'cancellation.dart';
+import 'exceptions.dart';
 
 /// Executes an operation with retry logic, exponential backoff, and jitter.
 Future<T> executeWithRetry<T>(
@@ -42,7 +44,39 @@ Future<T> executeWithRetry<T>(
 
       // Calculate delay with exponential backoff and full jitter
       final delay = _calculateDelay(attempts, retryConfig);
-      await Future.delayed(delay);
+
+      final CancellationToken? cancelToken =
+          ResilienceContext.currentCancellationToken;
+      if (cancelToken != null) {
+        if (cancelToken.isCancelled) {
+          throw const OperationCancelledException();
+        }
+
+        final delayCompleter = Completer<void>();
+        final timer = Timer(delay, () {
+          if (!delayCompleter.isCompleted) {
+            delayCompleter.complete();
+          }
+        });
+
+        unawaited(
+          cancelToken.onCancelled.then((_) {
+            if (!delayCompleter.isCompleted) {
+              delayCompleter.completeError(const OperationCancelledException());
+            }
+          }),
+        );
+
+        try {
+          await delayCompleter.future;
+          timer.cancel();
+        } catch (e) {
+          timer.cancel();
+          rethrow;
+        }
+      } else {
+        await Future.delayed(delay);
+      }
     }
   }
 }

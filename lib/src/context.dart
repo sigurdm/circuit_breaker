@@ -5,6 +5,7 @@ import 'retry.dart';
 import 'hedging.dart';
 import 'throttling.dart';
 import 'exceptions.dart';
+import 'cancellation.dart';
 
 /// Configuration for a specific resource's resilience policies.
 ///
@@ -617,6 +618,26 @@ final class HedgingConfig {
 /// }
 /// ```
 final class ResilienceContext {
+  /// Gets the current [CancellationToken] from the environment.
+  static CancellationToken? get currentCancellationToken =>
+      Zone.current[#_cancellationToken] as CancellationToken?;
+
+  /// Gets the current deadline from the environment.
+  static DateTime? get currentDeadline => Zone.current[#_deadline] as DateTime?;
+
+  /// Runs [action] within a zone that has the specified [deadline].
+  static R runWithDeadline<R>(DateTime deadline, R Function() action) {
+    return runZoned(action, zoneValues: {#_deadline: deadline});
+  }
+
+  /// Runs [action] within a zone that has the specified [token].
+  static R runWithCancellationToken<R>(
+    CancellationToken token,
+    R Function() action,
+  ) {
+    return runZoned(action, zoneValues: {#_cancellationToken: token});
+  }
+
   final Map<String, ResourceState> _states = {};
 
   /// Gets the states for all resources.
@@ -702,7 +723,45 @@ final class ResilienceContext {
       throw ThrottledException('Request throttled for ${resource.name}');
     }
 
+    // --- Deadline & Cancellation Setup ---
+    final parentDeadline = ResilienceContext.currentDeadline;
+    final DateTime? localDeadline = execConfig.timeout != null
+        ? DateTime.now().add(execConfig.timeout!)
+        : null;
+
+    final DateTime? effectiveDeadline = _mergeDeadlines(
+      parentDeadline,
+      localDeadline,
+    );
+
+    // Check if deadline is already exceeded
+    if (effectiveDeadline != null &&
+        DateTime.now().isAfter(effectiveDeadline)) {
+      circuitBreaker.recordFailure();
+      state.recordRequest(false, operation.criticality);
+      throw ResilienceTimeoutException('Deadline exceeded before execution');
+    }
+
+    final parentToken = ResilienceContext.currentCancellationToken;
+    final executionToken = CancellationToken();
+    if (parentToken != null) {
+      executionToken.attach(parentToken);
+    }
+
+    // Check if already cancelled
+    if (executionToken.isCancelled) {
+      throw const OperationCancelledException();
+    }
+    // --------------------------------------
+
     final topLevelCancel = Completer<void>();
+    unawaited(
+      executionToken.onCancelled.then((_) {
+        if (!topLevelCancel.isCompleted) {
+          topLevelCancel.complete();
+        }
+      }),
+    );
 
     // Wrap action to record attempt outcomes
     Future<T> instrumentedAction(Completer<void> cancel) async {
@@ -717,8 +776,30 @@ final class ResilienceContext {
       unawaited(cancel.future.then((_) => onCancel()));
       unawaited(topLevelCancel.future.then((_) => onCancel()));
 
+      final attemptToken = CancellationToken();
+      attemptToken.attach(executionToken);
+      unawaited(cancel.future.then((_) => attemptToken.cancel()));
+
       try {
-        final result = await action(combinedCancel);
+        final result = await runZoned(
+          () async {
+            if (attemptToken.isCancelled) {
+              throw const OperationCancelledException();
+            }
+            if (effectiveDeadline != null &&
+                DateTime.now().isAfter(effectiveDeadline)) {
+              throw ResilienceTimeoutException(
+                'Deadline exceeded during execution',
+              );
+            }
+            return await action(combinedCancel);
+          },
+          zoneValues: {
+            #_cancellationToken: attemptToken,
+            #_deadline: effectiveDeadline,
+          },
+        );
+
         if (!combinedCancel.isCompleted) {
           circuitBreaker.recordSuccess();
           state.recordRequest(true, operation.criticality);
@@ -735,39 +816,50 @@ final class ResilienceContext {
           }
           rethrow;
         } else {
-          throw const _OperationCancelledException();
+          throw const OperationCancelledException();
         }
       }
     }
 
-    final executionFuture = executeWithRetry(
-      () => executeWithHedging(
-        instrumentedAction,
+    final executionFuture = runZoned(
+      () => executeWithRetry(
+        () => executeWithHedging(
+          instrumentedAction,
+          config: execConfig,
+          state: state,
+        ),
         config: execConfig,
         state: state,
+        retryOn: (e) {
+          if (e is OperationCancelledException) return false;
+          if (e is CircuitBreakerOpenException) return false;
+          return retryOn?.call(e) ?? true;
+        },
       ),
-      config: execConfig,
-      state: state,
-      retryOn: (e) {
-        if (e is _OperationCancelledException) return false;
-        return retryOn?.call(e) ?? true;
+      zoneValues: {
+        #_cancellationToken: executionToken,
+        #_deadline: effectiveDeadline,
       },
     );
 
-    if (execConfig.timeout != null) {
-      final timeout = execConfig.timeout!;
-      final timer = Timer(timeout, () {
-        if (!topLevelCancel.isCompleted) {
-          topLevelCancel.complete();
-        }
-      });
+    if (effectiveDeadline != null) {
+      final remaining = effectiveDeadline.difference(DateTime.now());
+      final timer = Timer(
+        remaining > Duration.zero ? remaining : Duration.zero,
+        () {
+          if (!topLevelCancel.isCompleted) {
+            topLevelCancel.complete();
+          }
+          executionToken.cancel();
+        },
+      );
 
       try {
         final result = await Future.any([
           executionFuture,
           topLevelCancel.future.then(
             (_) => throw ResilienceTimeoutException(
-              'Operation timed out after $timeout',
+              'Operation timed out (deadline exceeded)',
             ),
           ),
         ]);
@@ -1017,6 +1109,8 @@ final class RetryAttemptRecord {
   const RetryAttemptRecord(this.timestamp, {required this.isRetry});
 }
 
-final class _OperationCancelledException implements Exception {
-  const _OperationCancelledException();
+DateTime? _mergeDeadlines(DateTime? d1, DateTime? d2) {
+  if (d1 == null) return d2;
+  if (d2 == null) return d1;
+  return d1.isBefore(d2) ? d1 : d2;
 }
