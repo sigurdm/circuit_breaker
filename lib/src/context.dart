@@ -780,6 +780,12 @@ final class ResilienceContext {
       attemptToken.attach(executionToken);
       unawaited(cancel.future.then((_) => attemptToken.cancel()));
 
+      if (state.circuitState == CircuitState.open) {
+        throw CircuitBreakerOpenException(
+          'Circuit breaker is open for ${resource.name}',
+        );
+      }
+
       try {
         final result = await runZoned(
           () async {

@@ -561,6 +561,39 @@ void main() {
           ),
         );
       });
+
+      test(
+        'Retry respects Circuit Breaker tripping (does not retry if CB trips mid-retry)',
+        () async {
+          resource = Resource(
+            'retry-vs-cb-trip',
+            config: ResourceConfig(
+              circuitBreaker: CircuitBreakerConfig(
+                consecutiveFailuresThreshold: 2,
+              ),
+              retry: RetryConfig(
+                maxAttempts: 3,
+                baseDelay: const Duration(milliseconds: 1),
+                enableJitter: false,
+              ),
+              throttling: ThrottlingConfig(k: 100.0), // Disable throttling
+            ),
+          );
+          op = Operation('call', resource);
+
+          int actionCalls = 0;
+
+          await expectLater(
+            context.execute(op, () async {
+              actionCalls++;
+              throw Exception('fail');
+            }),
+            throwsA(isA<CircuitBreakerOpenException>()),
+          );
+
+          expect(actionCalls, equals(2));
+        },
+      );
     });
 
     group('Simulator Integration Fixes', () {
