@@ -83,6 +83,21 @@ The library models your system's dependencies using three core concepts:
 
 This separation ensures that health metrics are aggregated at the service level (Resource) while allowing fine-grained policy tuning at the call level (Operation).
 
+### Hierarchical Resources (Nested Circuit Breakers)
+
+The library supports **nested circuit breakers** by allowing you to define a parent-child hierarchy for `Resource`s. This is useful when you have fine-grained resources that depend on a larger parent resource (e.g., individual API endpoints `/users/1` and `/users/2` depending on the parent `/users` API, or multiple services depending on a shared database).
+
+*   **Parent-to-Child Propagation**: If a parent circuit breaker trips to `OPEN`, all operations on child resources are automatically blocked (failing fast with `CircuitBreakerOpenException` mentioning the parent resource).
+*   **Selectivity (No Child-to-Parent Propagation)**: Failures on child resources *do not* propagate up to the parent. A single failing child resource (e.g., a specific broken endpoint) will trip its own circuit breaker, but other children of the same parent can continue to function.
+*   **Deadlock Avoidance & Recovery**: When a parent circuit breaker is open, children are blocked. Once the parent's reset timeout expires, child requests are allowed to proceed to act as **trial requests** for the parent. Success or failure of these child requests will propagate up to recover or re-open the parent circuit breaker.
+
+To define a hierarchy, pass the `parent` resource to the `Resource` constructor:
+
+```dart
+final parent = Resource('parent-service');
+final child = Resource('child-service', parent: parent);
+```
+
 ## Usage
 
 
@@ -378,3 +393,7 @@ To maintain accurate health metrics:
 *   **Google SRE Book - Addressing Cascading Failures**: [Chapter 22](https://sre.google/sre-book/addressing-cascading-failures)
 *   **The Tail at Scale**: [Dean & Barroso](https://cacm.acm.org/magazines/2013/2/160173-the-tail-at-scale/fulltext)
 *   **Circuit Breaker Pattern**: [Martin Fowler](https://martinfowler.com/bliki/CircuitBreaker.html)
+
+## Disclaimer
+
+This is not an officially supported Google product.
