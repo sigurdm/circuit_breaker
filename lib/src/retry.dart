@@ -4,6 +4,8 @@ import 'context.dart';
 import 'cancellation.dart';
 import 'exceptions.dart';
 
+final Random _random = Random();
+
 /// Executes an operation with retry logic, exponential backoff, and jitter.
 Future<T> executeWithRetry<T>(
   Future<T> Function() operation, {
@@ -27,9 +29,8 @@ Future<T> executeWithRetry<T>(
       }
 
       // Check retry budget.
-      state.cleanHistory(DateTime.now());
-      final totalRequests = state.retryHistory.length;
-      final totalRetries = state.retryHistory.where((r) => r.isRetry).length;
+      final totalRequests = state.getRetryBudgetRequests();
+      final totalRetries = state.getRetryBudgetRetries();
 
       if (totalRequests > retryConfig.minRequestsForBudget &&
           (totalRetries + 1) >
@@ -82,8 +83,6 @@ Future<T> executeWithRetry<T>(
 }
 
 Duration _calculateDelay(int attempt, RetryConfig config) {
-  final random = Random();
-
   // Exponential backoff: base * 2^attempt
   // attempt starts at 1, so we use attempt - 1 for the exponent to start at base delay.
   final double exp = pow(config.backoffFactor, attempt - 1).toDouble();
@@ -96,7 +95,7 @@ Duration _calculateDelay(int attempt, RetryConfig config) {
 
   if (config.enableJitter) {
     // Full Jitter: random between 0 and cappedDelay
-    final int jitterDelay = random.nextInt(cappedDelay.toInt() + 1);
+    final int jitterDelay = _random.nextInt(cappedDelay.toInt() + 1);
     return Duration(milliseconds: jitterDelay);
   } else {
     return Duration(milliseconds: cappedDelay.toInt());

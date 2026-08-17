@@ -6,6 +6,8 @@ import 'dart:async';
 final class CancellationToken {
   final Completer<void> _completer = Completer<void>();
   bool _isCancelled = false;
+  CancellationToken? _parent;
+  final Set<CancellationToken> _children = {};
 
   /// Creates a new [CancellationToken].
   CancellationToken();
@@ -21,6 +23,16 @@ final class CancellationToken {
     if (_isCancelled) return;
     _isCancelled = true;
     _completer.complete();
+
+    // Cancel all children. We copy the set to avoid concurrent modification
+    // because child.cancel() will call child.detach() which modifies _children.
+    final childrenToCancel = List.of(_children);
+    for (final child in childrenToCancel) {
+      child.cancel();
+    }
+    _children.clear();
+
+    detach();
   }
 
   /// Attaches this token to a [parent] token.
@@ -29,9 +41,16 @@ final class CancellationToken {
   void attach(CancellationToken parent) {
     if (parent.isCancelled) {
       cancel();
-    } else {
-      // Use unawaited to avoid lint warnings if we don't wait for it
-      unawaited(parent.onCancelled.then((_) => cancel()));
+      return;
     }
+    detach();
+    _parent = parent;
+    parent._children.add(this);
+  }
+
+  /// Detaches this token from its parent token.
+  void detach() {
+    _parent?._children.remove(this);
+    _parent = null;
   }
 }

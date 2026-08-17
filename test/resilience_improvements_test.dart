@@ -280,6 +280,9 @@ void main() {
         resource = Resource(
           'throttling-service',
           config: ResourceConfig(
+            circuitBreaker: CircuitBreakerConfig(
+              consecutiveFailuresThreshold: 100,
+            ),
             throttling: ThrottlingConfig(
               k: 1.0, // Strict throttling
               windowDuration: Duration(seconds: 10),
@@ -314,6 +317,55 @@ void main() {
           } catch (_) {}
         }
         expect(throttled, isTrue);
+      });
+
+      test('throttled requests are not recorded in history', () async {
+        resource = Resource(
+          'throttling-history-test',
+          config: ResourceConfig(
+            throttling: ThrottlingConfig(
+              k: 1.0, // Strict throttling
+              windowDuration: Duration(seconds: 10),
+            ),
+          ),
+        );
+        op = Operation(
+          'call',
+          resource,
+          retryOverride: RetryConfig(maxAttempts: 1),
+        );
+
+        // Trigger initialization of state
+        await context.execute(op, () async => 'success');
+
+        final state = context.states[resource.name]!;
+        state.requestHistory[op.criticality]!.clear(); // Clear the success
+
+        // Manually add 20 failures to trigger throttling (accepts = 0)
+        final now = DateTime.now();
+        for (int i = 0; i < 20; i++) {
+          state.requestHistory[op.criticality]!.add(RequestRecord(now, false));
+        }
+
+        expect(state.requestHistory[op.criticality]!.length, 20);
+
+        // Try to run requests until we get throttled
+        bool throttled = false;
+        for (int i = 0; i < 100; i++) {
+          try {
+            await context.execute(op, () async => 'success');
+          } on ThrottledException {
+            throttled = true;
+            break;
+          } catch (_) {}
+        }
+        expect(throttled, isTrue);
+
+        // Verify that no throttled requests were recorded as failures
+        final failures = state.requestHistory[op.criticality]!
+            .where((r) => !r.accepted)
+            .length;
+        expect(failures, equals(20)); // Still exactly 20 failures
       });
     });
 
@@ -428,6 +480,7 @@ void main() {
               circuitBreaker: CircuitBreakerConfig(
                 consecutiveFailuresThreshold: 2,
                 resetTimeout: Duration(milliseconds: 50),
+                halfOpenSuccessThreshold: 1,
               ),
               throttling: ThrottlingConfig(k: 1.0),
             ),
@@ -822,6 +875,68 @@ void main() {
           1,
         ); // only new one remains
       });
+    });
+
+    group('CancellationToken Leaks & Detach', () {
+      test('CancellationToken detach prevents cancellation propagation', () {
+        final parent = CancellationToken();
+        final child = CancellationToken();
+        child.attach(parent);
+        child.detach();
+        parent.cancel();
+        expect(child.isCancelled, isFalse);
+      });
+
+      test('CancellationToken cancel detaches from parent', () {
+        final parent = CancellationToken();
+        final child = CancellationToken();
+        child.attach(parent);
+        child.cancel();
+        expect(child.isCancelled, isTrue);
+        parent.cancel();
+      });
+    });
+
+    group('Circuit Breaker Recovery during Retries', () {
+      test(
+        'retry attempt recovers CB if reset timeout expires during retry delay',
+        () async {
+          resource = Resource(
+            'cb-retry-recover',
+            config: ResourceConfig(
+              circuitBreaker: CircuitBreakerConfig(
+                consecutiveFailuresThreshold: 1, // Trip on 1st failure
+                resetTimeout: const Duration(milliseconds: 50),
+                halfOpenSuccessThreshold: 1, // Explicitly 1 for this test
+              ),
+              retry: RetryConfig(
+                maxAttempts: 2,
+                baseDelay: const Duration(
+                  milliseconds: 80,
+                ), // Delay > resetTimeout
+                enableJitter: false,
+              ),
+              throttling: ThrottlingConfig(k: 100.0), // Disable throttling
+            ),
+          );
+          op = Operation('call', resource);
+
+          int attempts = 0;
+          final result = await context.execute(op, () async {
+            attempts++;
+            if (attempts == 1) {
+              throw Exception('temporary fail');
+            }
+            return 'recovered';
+          });
+
+          expect(result, equals('recovered'));
+          expect(attempts, equals(2));
+
+          final state = context.states[resource.name]!;
+          expect(state.circuitState, equals(CircuitState.closed));
+        },
+      );
     });
   });
 }

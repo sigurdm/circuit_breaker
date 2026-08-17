@@ -15,7 +15,7 @@
 /// The main entry point is [ResilienceContext]. You can use it to execute operations
 /// with configured policies for named resources.
 ///
-/// {@example /example/main.dart}
+/// {@example example/main.dart}
 library circuit_breaker;
 
 export 'src/context.dart'

@@ -21,23 +21,38 @@ final class CircuitBreaker {
 
     if (state.circuitState == CircuitState.open) {
       final now = DateTime.now();
-      if (now.difference(state.lastFailureTime!) > cbConfig.resetTimeout) {
-        // Transition to half-open
+      if (state.lastFailureTime != null &&
+          now.difference(state.lastFailureTime!) > cbConfig.resetTimeout) {
+        // Transition to half-open and start trial
         state.circuitState = CircuitState.halfOpen;
+        state.trialRequestInProgress = true;
         return true;
       }
       return false;
     }
 
-    // Half-open: block all subsequent requests while the trial request is in progress.
+    if (state.circuitState == CircuitState.halfOpen) {
+      if (!state.trialRequestInProgress) {
+        state.trialRequestInProgress = true;
+        return true;
+      }
+      return false;
+    }
+
     return false;
   }
 
   /// Records a successful operation.
   void recordSuccess() {
     if (state.circuitState == CircuitState.halfOpen) {
-      state.circuitState = CircuitState.closed;
-      state.failureCount = 0;
+      state.trialRequestInProgress = false;
+      state.halfOpenSuccessCount++;
+      if (state.halfOpenSuccessCount >=
+          config.circuitBreaker.halfOpenSuccessThreshold) {
+        state.circuitState = CircuitState.closed;
+        state.failureCount = 0;
+        state.halfOpenSuccessCount = 0;
+      }
     } else if (state.circuitState == CircuitState.closed) {
       state.failureCount = 0; // Reset count on success
     }
@@ -51,6 +66,8 @@ final class CircuitBreaker {
     final cbConfig = config.circuitBreaker;
 
     if (state.circuitState == CircuitState.halfOpen) {
+      state.trialRequestInProgress = false;
+      state.halfOpenSuccessCount = 0;
       state.circuitState = CircuitState.open;
     } else if (state.failureCount >= cbConfig.consecutiveFailuresThreshold) {
       state.circuitState = CircuitState.open;

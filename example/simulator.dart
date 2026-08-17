@@ -472,6 +472,7 @@ Future<String> mockBackend(Completer<void> cancelSignal) async {
 
 final statsTracker = StatsTracker();
 final context = ResilienceContext();
+Resource? activeResource;
 
 ResourceConfig buildConfig() {
   return ResourceConfig(
@@ -545,6 +546,34 @@ void executeRequest(Resource resource, Criticality criticality) async {
       latency: stopwatch.elapsed,
     );
   }
+}
+
+void startRequestLoop(Criticality criticality) {
+  Future.microtask(() async {
+    final random = Random();
+    while (true) {
+      final baseRps = 20.0;
+      double rps = baseRps;
+      if (state.activeScenario == Scenario.trafficSpike) {
+        rps = baseRps * 5.0;
+      }
+
+      if (rps <= 0) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        continue;
+      }
+
+      final u = random.nextDouble();
+      final intervalSec = -log(max(u, 1e-10)) / rps;
+      final intervalMs = (intervalSec * 1000).round();
+
+      await Future.delayed(Duration(milliseconds: max(1, intervalMs)));
+
+      if (activeResource != null) {
+        executeRequest(activeResource!, criticality);
+      }
+    }
+  });
 }
 
 void setStatus(String msg) {
@@ -1206,12 +1235,17 @@ void main() async {
     exit(0);
   });
 
-  var resource = Resource('api-service', config: buildConfig());
+  activeResource = Resource('api-service', config: buildConfig());
 
-  // Simulation loop: every 50ms
+  // Start independent request loops for each criticality (Poisson arrivals)
+  for (final criticality in Criticality.values) {
+    startRequestLoop(criticality);
+  }
+
+  // Simulation loop: every 50ms (handles scenarios and CB logging)
   Timer.periodic(const Duration(milliseconds: 50), (timer) {
     if (state.configChanged) {
-      resource = Resource('api-service', config: buildConfig());
+      activeResource = Resource('api-service', config: buildConfig());
       state.configChanged = false;
     }
 
@@ -1238,14 +1272,6 @@ void main() async {
         }
         state.lastObservedCBState = currentCBState;
       }
-    }
-
-    final requestCount = state.activeScenario == Scenario.trafficSpike ? 5 : 1;
-    for (var i = 0; i < requestCount; i++) {
-      executeRequest(resource, Criticality.criticalPlus);
-      executeRequest(resource, Criticality.critical);
-      executeRequest(resource, Criticality.sheddablePlus);
-      executeRequest(resource, Criticality.sheddable);
     }
   });
 

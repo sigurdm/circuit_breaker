@@ -16,15 +16,13 @@ final class AdaptiveThrottler {
 
   AdaptiveThrottler(this.config, this.state);
 
+  static final Random _random = Random();
+
   /// Checks if the request should be throttled.
   /// Returns true if it should be throttled (rejected).
   bool shouldThrottle(Criticality criticality) {
-    final now = DateTime.now();
-    state.cleanHistory(now);
-
-    final history = state.requestHistory[criticality]!;
-    final requests = history.length;
-    final accepts = history.where((r) => r.accepted).length;
+    final requests = state.getThrottlingRequests(criticality);
+    final accepts = state.getThrottlingAccepts(criticality);
 
     final k = config.throttling.getK(criticality);
 
@@ -35,8 +33,7 @@ final class AdaptiveThrottler {
       return false;
     }
 
-    final random = Random();
-    return random.nextDouble() < p;
+    return _random.nextDouble() < p;
   }
 }
 
@@ -46,15 +43,7 @@ final class AdaptiveThrottler {
 /// backend is overloaded based on recent success/failure history, and
 /// proactively rejects the request to avoid adding load.
 ///
-/// Example:
-/// ```dart
-/// try {
-///   await context.execute('resource', (_) async => ...);
-/// } on ThrottledException catch (e) {
-///   print('Request was throttled: ${e.message}');
-///   // Fallback or wait and retry
-/// }
-/// ```
+/// {@example example/throttling_example.dart}
 final class ThrottledException implements Exception {
   /// Message describing the reason for throttling.
   final String message;

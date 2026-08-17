@@ -121,6 +121,17 @@ void main() {
           throwsArgumentError,
         );
       });
+
+      test('halfOpenSuccessThreshold < 1 throws ArgumentError', () {
+        expect(
+          () => CircuitBreakerConfig(halfOpenSuccessThreshold: 0),
+          throwsArgumentError,
+        );
+        expect(
+          () => CircuitBreakerConfig(halfOpenSuccessThreshold: -1),
+          throwsArgumentError,
+        );
+      });
     });
 
     group('RetryConfig', () {
@@ -253,6 +264,11 @@ void main() {
     group('Resource', () {
       test('empty name throws ArgumentError', () {
         expect(() => Resource(''), throwsArgumentError);
+      });
+
+      test('cycle in hierarchy (same name) throws ArgumentError', () {
+        final parent = Resource('A');
+        expect(() => Resource('A', parent: parent), throwsArgumentError);
       });
     });
 

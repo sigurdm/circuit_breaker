@@ -90,6 +90,7 @@ Future<T> executeWithHedging<T>(
   final resultCompleter = Completer<T>();
   int failures = 0;
   Object? lastError;
+  StackTrace? lastStackTrace;
 
   void handleResult(
     Future<T> source,
@@ -110,11 +111,12 @@ Future<T> executeWithHedging<T>(
             resultCompleter.complete(value);
           }
         })
-        .catchError((error) {
+        .catchError((Object error, StackTrace stackTrace) {
           failures++;
           lastError = error;
+          lastStackTrace = stackTrace;
           if (failures == 2 && !resultCompleter.isCompleted) {
-            resultCompleter.completeError(lastError!);
+            resultCompleter.completeError(lastError!, lastStackTrace);
           }
         })
         .whenComplete(() {

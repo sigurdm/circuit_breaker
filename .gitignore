@@ -1,5 +1,6 @@
 .dart_tool/
 build/
 coverage/
+coverage.lcov
 .pub-cache/
 *.log

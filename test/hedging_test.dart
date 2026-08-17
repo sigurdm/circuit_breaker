@@ -112,5 +112,30 @@ void main() {
       // The second request succeeded, so it wasn't cancelled
       expect(c2.isCompleted, isFalse);
     });
+
+    test('preserves original StackTrace when both attempts fail', () async {
+      int attempts = 0;
+      StackTrace? caughtStackTrace;
+
+      try {
+        await executeWithHedging(
+          (cancelSignal) async {
+            attempts++;
+            if (attempts == 1) {
+              await Future.delayed(const Duration(milliseconds: 60));
+            }
+            throw StateError('failed attempt $attempts');
+          },
+          config: config,
+          state: state,
+        );
+      } catch (e, st) {
+        caughtStackTrace = st;
+      }
+
+      expect(attempts, 2);
+      expect(caughtStackTrace, isNotNull);
+      expect(caughtStackTrace.toString(), contains('hedging_test.dart'));
+    });
   });
 }

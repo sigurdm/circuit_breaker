@@ -86,13 +86,27 @@ final class Resource {
   /// The base configuration for this resource.
   final ResourceConfig config;
 
+  /// The parent resource, if any.
+  final Resource? parent;
+
   /// Creates a [Resource].
   ///
-  /// Throws [ArgumentError] if [name] is empty.
-  Resource(this.name, {ResourceConfig? config})
+  /// It is an error if:
+  /// - [name] is empty.
+  /// - There is a cycle in the parent hierarchy.
+  Resource(this.name, {ResourceConfig? config, this.parent})
     : config = config ?? ResourceConfig() {
     if (name.isEmpty) {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
+    }
+    var current = parent;
+    while (current != null) {
+      if (current.name == name) {
+        throw ArgumentError(
+          'Cycle detected in resource hierarchy: $name is a parent of itself.',
+        );
+      }
+      current = current.parent;
     }
   }
 }
@@ -176,13 +190,20 @@ final class CircuitBreakerConfig {
   /// to test the service again.
   final Duration resetTimeout;
 
+  /// The number of successful requests required in Half-Open state
+  /// before the circuit transitions back to Closed.
+  final int halfOpenSuccessThreshold;
+
   /// Creates a [CircuitBreakerConfig].
   ///
-  /// Throws [ArgumentError] if [consecutiveFailuresThreshold] is < 1,
-  /// or if [resetTimeout] is not positive.
+  /// It is an error if:
+  /// - [consecutiveFailuresThreshold] is < 1
+  /// - [resetTimeout] is not positive
+  /// - [halfOpenSuccessThreshold] is < 1
   CircuitBreakerConfig({
     this.consecutiveFailuresThreshold = 5,
     this.resetTimeout = const Duration(seconds: 30),
+    this.halfOpenSuccessThreshold = 3,
   }) {
     if (consecutiveFailuresThreshold < 1) {
       throw ArgumentError.value(
@@ -196,6 +217,13 @@ final class CircuitBreakerConfig {
         resetTimeout,
         'resetTimeout',
         'must be positive',
+      );
+    }
+    if (halfOpenSuccessThreshold < 1) {
+      throw ArgumentError.value(
+        halfOpenSuccessThreshold,
+        'halfOpenSuccessThreshold',
+        'must be >= 1',
       );
     }
   }
@@ -588,6 +616,28 @@ final class HedgingConfig {
   }
 }
 
+/// The result of checking a resource's circuit breaker state.
+enum _CheckResult {
+  /// The circuit breaker is closed, request is allowed.
+  allowedClosed,
+
+  /// The circuit breaker is open but reset timeout has expired,
+  /// so we are allowed to start a new trial request.
+  allowedStartTrial,
+
+  /// The circuit breaker is half-open and we are the active trial request,
+  /// so we are allowed to continue (e.g. for hedges or retries of the trial).
+  allowedContinueTrial,
+
+  /// The circuit breaker is open and reset timeout has not expired,
+  /// request is blocked.
+  blockedOpen,
+
+  /// The circuit breaker is half-open and another trial request is already
+  /// in progress, request is blocked.
+  blockedTrialInProgress,
+}
+
 /// Context that holds state for named resources and executes operations.
 ///
 /// This is the main entry point for using the `circuit_breaker` package.
@@ -652,6 +702,96 @@ final class ResilienceContext {
     return state;
   }
 
+  _CheckResult _checkResource(
+    ResourceState state,
+    CircuitBreakerConfig config,
+    CancellationToken? token,
+  ) {
+    if (state.circuitState == CircuitState.closed) {
+      return _CheckResult.allowedClosed;
+    }
+    if (state.circuitState == CircuitState.open) {
+      final now = DateTime.now();
+      if (state.lastFailureTime != null &&
+          now.difference(state.lastFailureTime!) > config.resetTimeout) {
+        return _CheckResult.allowedStartTrial;
+      }
+      return _CheckResult.blockedOpen;
+    }
+    if (state.circuitState == CircuitState.halfOpen) {
+      if (!state.trialRequestInProgress || state.activeTrialToken == token) {
+        return _CheckResult.allowedContinueTrial;
+      }
+      return _CheckResult.blockedTrialInProgress;
+    }
+    return _CheckResult.blockedOpen;
+  }
+
+  void _checkCircuitBreakerChainFailFast(
+    Resource resource,
+    CancellationToken? token,
+  ) {
+    Resource? current = resource;
+    while (current != null) {
+      final s = _getState(current);
+      final res = _checkResource(s, current.config.circuitBreaker, token);
+      if (res == _CheckResult.blockedOpen ||
+          res == _CheckResult.blockedTrialInProgress) {
+        final stateStr = s.circuitState == CircuitState.halfOpen
+            ? 'half-open'
+            : 'open';
+        throw CircuitBreakerOpenException(
+          'Circuit breaker is $stateStr for ${current.name}',
+        );
+      }
+      current = current.parent;
+    }
+  }
+
+  void _checkAndTransitionCircuitBreakerChain(
+    Resource resource,
+    List<ResourceState> statesToRecord,
+    CancellationToken token,
+  ) {
+    Resource? current = resource;
+    final statesToTransition = <ResourceState>[];
+    bool allowed = true;
+    String? blockedReason;
+
+    while (current != null) {
+      final s = _getState(current);
+      final res = _checkResource(s, current.config.circuitBreaker, token);
+      if (res == _CheckResult.blockedOpen ||
+          res == _CheckResult.blockedTrialInProgress) {
+        final stateStr = s.circuitState == CircuitState.halfOpen
+            ? 'half-open'
+            : 'open';
+        allowed = false;
+        blockedReason = 'Circuit breaker is $stateStr for ${current.name}';
+        break;
+      }
+      if (res == _CheckResult.allowedStartTrial) {
+        statesToTransition.add(s);
+        statesToRecord.add(s);
+      } else if (res == _CheckResult.allowedContinueTrial) {
+        statesToRecord.add(s);
+      }
+      current = current.parent;
+    }
+
+    if (!allowed) {
+      throw CircuitBreakerOpenException(blockedReason!);
+    }
+
+    // Commit transitions
+    for (final s in statesToTransition) {
+      s.circuitState = CircuitState.halfOpen;
+    }
+    for (final s in statesToRecord) {
+      s.activeTrialToken = token;
+    }
+  }
+
   /// Executes an operation with the configured resilience policies.
   ///
   /// Use this version for operations that DO NOT support cancellation.
@@ -704,26 +844,32 @@ final class ResilienceContext {
       failureClassifier: resource.config.failureClassifier,
     );
 
-    final throttler = AdaptiveThrottler(execConfig, state);
-    final circuitBreaker = CircuitBreaker(execConfig, state);
-
-    // 1. Circuit Breaker Check (First)
-    if (!circuitBreaker.isAllowed) {
-      // DO NOT record request in throttling history when blocked by CB.
-      throw CircuitBreakerOpenException(
-        'Circuit breaker is open for ${resource.name}',
-      );
+    final parentToken = ResilienceContext.currentCancellationToken;
+    final executionToken = CancellationToken();
+    if (parentToken != null) {
+      executionToken.attach(parentToken);
     }
 
+    final throttler = AdaptiveThrottler(execConfig, state);
+
+    // 1. Circuit Breaker Check (Fail-Fast Dry Run)
+    _checkCircuitBreakerChainFailFast(resource, executionToken);
+
     // 2. Adaptive Throttling Check (Second)
-    // Bypass throttling if the Circuit Breaker is in Half-Open state (trial request).
-    final isHalfOpen = state.circuitState == CircuitState.halfOpen;
+    final leafRes = _checkResource(
+      state,
+      execConfig.circuitBreaker,
+      executionToken,
+    );
+    final isHalfOpen =
+        state.circuitState == CircuitState.halfOpen ||
+        leafRes == _CheckResult.allowedStartTrial;
+
     if (!isHalfOpen && throttler.shouldThrottle(operation.criticality)) {
-      state.recordRequest(false, operation.criticality);
       throw ThrottledException('Request throttled for ${resource.name}');
     }
 
-    // --- Deadline & Cancellation Setup ---
+    // --- Deadline Setup ---
     final parentDeadline = ResilienceContext.currentDeadline;
     final DateTime? localDeadline = execConfig.timeout != null
         ? DateTime.now().add(execConfig.timeout!)
@@ -737,149 +883,174 @@ final class ResilienceContext {
     // Check if deadline is already exceeded
     if (effectiveDeadline != null &&
         DateTime.now().isAfter(effectiveDeadline)) {
-      circuitBreaker.recordFailure();
-      state.recordRequest(false, operation.criticality);
       throw ResilienceTimeoutException('Deadline exceeded before execution');
     }
 
-    final parentToken = ResilienceContext.currentCancellationToken;
-    final executionToken = CancellationToken();
-    if (parentToken != null) {
-      executionToken.attach(parentToken);
-    }
-
-    // Check if already cancelled
-    if (executionToken.isCancelled) {
-      throw const OperationCancelledException();
-    }
-    // --------------------------------------
-
-    final topLevelCancel = Completer<Exception>();
-    unawaited(
-      executionToken.onCancelled.then((_) {
-        if (!topLevelCancel.isCompleted) {
-          topLevelCancel.complete(const OperationCancelledException());
-        }
-      }),
+    // 3. Commit Circuit Breaker Transitions
+    final statesToRecord = <ResourceState>[];
+    _checkAndTransitionCircuitBreakerChain(
+      resource,
+      statesToRecord,
+      executionToken,
     );
-
-    // Wrap action to record attempt outcomes
-    Future<T> instrumentedAction(Completer<void> cancel) async {
-      final combinedCancel = Completer<void>();
-
-      void onCancel() {
-        if (!combinedCancel.isCompleted) {
-          combinedCancel.complete();
-        }
-      }
-
-      unawaited(cancel.future.then((_) => onCancel()));
-      unawaited(topLevelCancel.future.then((_) => onCancel()));
-
-      final attemptToken = CancellationToken();
-      attemptToken.attach(executionToken);
-      unawaited(cancel.future.then((_) => attemptToken.cancel()));
-
-      if (state.circuitState == CircuitState.open) {
-        throw CircuitBreakerOpenException(
-          'Circuit breaker is open for ${resource.name}',
-        );
-      }
-
-      try {
-        final result = await runZoned(
-          () async {
-            if (attemptToken.isCancelled) {
-              throw const OperationCancelledException();
-            }
-            if (effectiveDeadline != null &&
-                DateTime.now().isAfter(effectiveDeadline)) {
-              throw ResilienceTimeoutException(
-                'Deadline exceeded during execution',
-              );
-            }
-            return await action(combinedCancel);
-          },
-          zoneValues: {
-            #_cancellationToken: attemptToken,
-            #_deadline: effectiveDeadline,
-          },
-        );
-
-        if (!combinedCancel.isCompleted) {
-          circuitBreaker.recordSuccess();
-          state.recordRequest(true, operation.criticality);
-        }
-        return result;
-      } catch (e) {
-        if (!combinedCancel.isCompleted) {
-          if (execConfig.failureClassifier(e)) {
-            circuitBreaker.recordFailure();
-            state.recordRequest(false, operation.criticality);
-          } else {
-            circuitBreaker.recordSuccess();
-            state.recordRequest(true, operation.criticality);
-          }
-          rethrow;
-        } else {
-          throw const OperationCancelledException();
-        }
-      }
+    if (!statesToRecord.contains(state)) {
+      statesToRecord.add(state);
     }
-
-    final executionFuture = runZoned(
-      () => executeWithRetry(
-        () => executeWithHedging(
-          instrumentedAction,
-          config: execConfig,
-          state: state,
-        ),
-        config: execConfig,
-        state: state,
-        retryOn: (e) {
-          if (e is OperationCancelledException) return false;
-          if (e is CircuitBreakerOpenException) return false;
-          return retryOn?.call(e) ?? true;
-        },
-      ),
-      zoneValues: {
-        #_cancellationToken: executionToken,
-        #_deadline: effectiveDeadline,
-      },
-    );
 
     Timer? timeoutTimer;
-    if (effectiveDeadline != null) {
-      final remaining = effectiveDeadline.difference(DateTime.now());
-      timeoutTimer = Timer(
-        remaining > Duration.zero ? remaining : Duration.zero,
-        () {
+    try {
+      // Check if already cancelled
+      if (executionToken.isCancelled) {
+        throw const OperationCancelledException();
+      }
+      // --------------------------------------
+
+      final topLevelCancel = Completer<Exception>();
+      unawaited(
+        executionToken.onCancelled.then((_) {
           if (!topLevelCancel.isCompleted) {
-            topLevelCancel.complete(
-              ResilienceTimeoutException(
-                'Operation timed out (deadline exceeded)',
-              ),
-            );
+            topLevelCancel.complete(const OperationCancelledException());
           }
-          executionToken.cancel();
+        }),
+      );
+
+      // Wrap action to record attempt outcomes
+      Future<T> instrumentedAction(Completer<void> cancel) async {
+        final combinedCancel = Completer<void>();
+
+        void onCancel() {
+          if (!combinedCancel.isCompleted) {
+            combinedCancel.complete();
+          }
+        }
+
+        unawaited(cancel.future.then((_) => onCancel()));
+        unawaited(topLevelCancel.future.then((_) => onCancel()));
+
+        final attemptToken = CancellationToken();
+        attemptToken.attach(executionToken);
+        unawaited(cancel.future.then((_) => attemptToken.cancel()));
+
+        final attemptStatesToRecord = <ResourceState>[];
+        try {
+          _checkAndTransitionCircuitBreakerChain(
+            resource,
+            attemptStatesToRecord,
+            executionToken,
+          );
+          if (!attemptStatesToRecord.contains(state)) {
+            attemptStatesToRecord.add(state);
+          }
+
+          try {
+            final result = await runZoned(
+              () async {
+                if (attemptToken.isCancelled) {
+                  throw const OperationCancelledException();
+                }
+                if (effectiveDeadline != null &&
+                    DateTime.now().isAfter(effectiveDeadline)) {
+                  throw ResilienceTimeoutException(
+                    'Deadline exceeded during execution',
+                  );
+                }
+                return await action(combinedCancel);
+              },
+              zoneValues: {
+                #_cancellationToken: attemptToken,
+                #_deadline: effectiveDeadline,
+              },
+            );
+
+            if (!combinedCancel.isCompleted) {
+              for (final s in attemptStatesToRecord) {
+                final cb = CircuitBreaker(s.config, s);
+                cb.recordSuccess();
+              }
+              state.recordRequest(true, operation.criticality);
+            }
+            return result;
+          } catch (e) {
+            if (!combinedCancel.isCompleted) {
+              if (execConfig.failureClassifier(e)) {
+                for (final s in attemptStatesToRecord) {
+                  final cb = CircuitBreaker(s.config, s);
+                  cb.recordFailure();
+                }
+                state.recordRequest(false, operation.criticality);
+              } else {
+                for (final s in attemptStatesToRecord) {
+                  final cb = CircuitBreaker(s.config, s);
+                  cb.recordSuccess();
+                }
+                state.recordRequest(true, operation.criticality);
+              }
+              rethrow;
+            } else {
+              throw const OperationCancelledException();
+            }
+          }
+        } finally {
+          attemptToken.detach();
+        }
+      }
+
+      final executionFuture = runZoned(
+        () => executeWithRetry(
+          () => executeWithHedging(
+            instrumentedAction,
+            config: execConfig,
+            state: state,
+          ),
+          config: execConfig,
+          state: state,
+          retryOn: (e) {
+            if (e is OperationCancelledException) return false;
+            if (e is CircuitBreakerOpenException) return false;
+            return retryOn?.call(e) ?? true;
+          },
+        ),
+        zoneValues: {
+          #_cancellationToken: executionToken,
+          #_deadline: effectiveDeadline,
         },
       );
-    }
+      executionFuture.ignore();
 
-    try {
+      if (effectiveDeadline != null) {
+        final remaining = effectiveDeadline.difference(DateTime.now());
+        timeoutTimer = Timer(
+          remaining > Duration.zero ? remaining : Duration.zero,
+          () {
+            if (!topLevelCancel.isCompleted) {
+              topLevelCancel.complete(
+                ResilienceTimeoutException(
+                  'Operation timed out (deadline exceeded)',
+                ),
+              );
+            }
+            executionToken.cancel();
+          },
+        );
+      }
+
       final result = await Future.any([
         executionFuture,
         topLevelCancel.future.then((e) => throw e),
       ]);
-      timeoutTimer?.cancel();
       return result;
     } catch (e) {
-      timeoutTimer?.cancel();
       if (e is ResilienceTimeoutException) {
-        circuitBreaker.recordFailure();
+        for (final s in statesToRecord) {
+          final cb = CircuitBreaker(s.config, s);
+          cb.recordFailure();
+        }
         state.recordRequest(false, operation.criticality);
       }
       rethrow;
+    } finally {
+      timeoutTimer?.cancel();
+      executionToken.detach();
     }
   }
 }
@@ -908,6 +1079,27 @@ class ResourceState {
   ///
   /// Should only be mutated by the library.
   DateTime? lastFailureTime;
+
+  /// The number of consecutive successes in Half-Open state.
+  int halfOpenSuccessCount = 0;
+
+  CancellationToken? _activeTrialToken;
+
+  /// The cancellation token of the active trial request, if any.
+  CancellationToken? get activeTrialToken => _activeTrialToken;
+  set activeTrialToken(CancellationToken? token) {
+    _activeTrialToken = token;
+  }
+
+  /// Whether a trial request is currently in progress in Half-Open state.
+  bool get trialRequestInProgress => _activeTrialToken != null;
+  set trialRequestInProgress(bool value) {
+    if (value) {
+      _activeTrialToken ??= CancellationToken();
+    } else {
+      _activeTrialToken = null;
+    }
+  }
 
   CircuitState _circuitState = CircuitState.closed;
 
