@@ -274,8 +274,8 @@ final class Retry {
         }
       },
       zoneValues: {
-        #_cancellationToken: executionToken,
-        #_deadline: effectiveDeadline,
+        ResilienceContext.cancellationTokenZoneKey: executionToken,
+        ResilienceContext.deadlineZoneKey: effectiveDeadline,
       },
     );
 

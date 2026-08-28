@@ -938,12 +938,21 @@ final class ResilienceContext {
     return ctx.executeCancelable(target, action, retryOn: retryOn);
   }
 
+  /// **Internal use only.**
+  @internal
+  static const Object cancellationTokenZoneKey = #_cancellationToken;
+
+  /// **Internal use only.**
+  @internal
+  static const Object deadlineZoneKey = #_deadline;
+
   /// Gets the current [CancellationToken] from the environment.
   static CancellationToken? get currentCancellationToken =>
-      Zone.current[#_cancellationToken] as CancellationToken?;
+      Zone.current[cancellationTokenZoneKey] as CancellationToken?;
 
   /// Gets the current deadline from the environment.
-  static DateTime? get currentDeadline => Zone.current[#_deadline] as DateTime?;
+  static DateTime? get currentDeadline =>
+      Zone.current[deadlineZoneKey] as DateTime?;
 
   /// Runs [action] within a zone that has the specified [deadline].
   ///
@@ -951,7 +960,7 @@ final class ResilienceContext {
   static R runWithDeadline<R>(DateTime deadline, R Function() action) {
     final parent = currentDeadline;
     final effective = _mergeDeadlines(parent, deadline)!;
-    return runZoned(action, zoneValues: {#_deadline: effective});
+    return runZoned(action, zoneValues: {deadlineZoneKey: effective});
   }
 
   /// Runs [action] within a zone that has the specified [token].
@@ -963,7 +972,7 @@ final class ResilienceContext {
     if (parent != null) {
       token.attach(parent);
     }
-    return runZoned(action, zoneValues: {#_cancellationToken: token});
+    return runZoned(action, zoneValues: {cancellationTokenZoneKey: token});
   }
 
   final Map<String, ResourceState> _states = {};
@@ -1304,8 +1313,8 @@ final class ResilienceContext {
               return await action(combinedCancel);
             },
             zoneValues: {
-              #_cancellationToken: attemptToken,
-              #_deadline: effectiveDeadline,
+              ResilienceContext.cancellationTokenZoneKey: attemptToken,
+              ResilienceContext.deadlineZoneKey: effectiveDeadline,
             },
           );
         } finally {
@@ -1394,8 +1403,8 @@ final class ResilienceContext {
           }
         },
         zoneValues: {
-          #_cancellationToken: executionToken,
-          #_deadline: effectiveDeadline,
+          ResilienceContext.cancellationTokenZoneKey: executionToken,
+          ResilienceContext.deadlineZoneKey: effectiveDeadline,
         },
       );
       final executionFuture = executionCompleter.future;

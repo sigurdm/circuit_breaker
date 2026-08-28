@@ -493,4 +493,54 @@ void main() {
       expect(await wrappedUnary(21), equals(42));
     });
   });
+
+  group('Top-level hedge(...) function', () {
+    test('succeeds fast without hedge if completed before delay', () async {
+      final result = await hedge(
+        () async => 'fast-result',
+        delay: const Duration(milliseconds: 100),
+      );
+      expect(result, equals('fast-result'));
+    });
+
+    test('hedges and returns faster result when primary is slow', () async {
+      int calls = 0;
+      final result = await hedge(() async {
+        calls++;
+        if (calls == 1) {
+          await Future.delayed(const Duration(milliseconds: 100));
+          return 'slow-primary';
+        }
+        return 'fast-hedge';
+      }, delay: const Duration(milliseconds: 20));
+      expect(result, equals('fast-hedge'));
+      expect(calls, equals(2));
+    });
+
+    test(
+      'RequestHedger.executeCancelable injects per-attempt CancellationToken',
+      () async {
+        final hedger = RequestHedger.standalone(
+          delay: const Duration(milliseconds: 20),
+        );
+
+        CancellationToken? attempt1Token;
+        final result = await hedger.executeCancelable((cancel) async {
+          attempt1Token ??= ResilienceContext.currentCancellationToken;
+          if (attempt1Token != null &&
+              attempt1Token == ResilienceContext.currentCancellationToken) {
+            // Primary slow request
+            await Future.delayed(const Duration(milliseconds: 80));
+            return 'primary';
+          }
+          // Speculative hedge
+          return 'hedge-fast';
+        });
+
+        expect(result, equals('hedge-fast'));
+        expect(attempt1Token, isNotNull);
+        expect(attempt1Token!.isCancelled, isTrue);
+      },
+    );
+  });
 }

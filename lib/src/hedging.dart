@@ -341,15 +341,45 @@ final class RequestHedger {
       );
     }
 
-    Future<T> wrappedAction(Completer<void> cancel) {
+    Future<T> wrappedAction(Completer<void> cancel) async {
       final combinedCancel = Completer<void>();
       void onCancel() {
         if (!combinedCancel.isCompleted) combinedCancel.complete();
       }
 
-      unawaited(cancel.future.then((_) => onCancel()));
-      unawaited(topLevelCancel.future.then((_) => onCancel()));
-      return action(combinedCancel);
+      unawaited(cancel.future.then((_) => onCancel()).catchError((_, __) {}));
+      unawaited(
+        topLevelCancel.future.then((_) => onCancel()).catchError((_, __) {}),
+      );
+
+      final attemptToken = CancellationToken();
+      attemptToken.attach(executionToken);
+      unawaited(
+        cancel.future.then((_) => attemptToken.cancel()).catchError((_, __) {}),
+      );
+
+      try {
+        return await runZoned(
+          () async {
+            if (attemptToken.isCancelled) {
+              throw const OperationCancelledException();
+            }
+            if (effectiveDeadline != null &&
+                DateTime.now().isAfter(effectiveDeadline)) {
+              throw ResilienceTimeoutException(
+                'Deadline exceeded during execution',
+              );
+            }
+            return await action(combinedCancel);
+          },
+          zoneValues: {
+            ResilienceContext.cancellationTokenZoneKey: attemptToken,
+            ResilienceContext.deadlineZoneKey: effectiveDeadline,
+          },
+        );
+      } finally {
+        attemptToken.detach();
+      }
     }
 
     final executionCompleter = Completer<T>();
@@ -376,8 +406,8 @@ final class RequestHedger {
         }
       },
       zoneValues: {
-        #_cancellationToken: executionToken,
-        #_deadline: effectiveDeadline,
+        ResilienceContext.cancellationTokenZoneKey: executionToken,
+        ResilienceContext.deadlineZoneKey: effectiveDeadline,
       },
     );
 
@@ -402,4 +432,24 @@ final class RequestHedger {
   /// Wraps a unary function [action] returning a function protected by request hedging.
   Future<T> Function(A) wrapUnary<T, A>(Future<T> Function(A) action) =>
       (A arg) => execute(() => action(arg));
+}
+
+/// Executes [action] with request hedging.
+///
+/// This convenience function provides an ad-hoc, one-liner way to execute an operation
+/// with speculative hedging without manually instantiating a [RequestHedger].
+Future<T> hedge<T>(
+  Future<T> Function() action, {
+  Duration delay = const Duration(milliseconds: 500),
+  Duration? timeout,
+  bool Function(Object)? failureClassifier,
+  HedgingConfig? config,
+}) {
+  final h = RequestHedger.standalone(
+    config: config,
+    delay: delay,
+    timeout: timeout,
+    failureClassifier: failureClassifier,
+  );
+  return h.execute(action);
 }
