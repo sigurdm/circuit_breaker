@@ -97,9 +97,11 @@ void main() {
         config: ResourceConfig(
           circuitBreaker: CircuitBreakerConfig(
             consecutiveFailuresThreshold: 2,
-            resetTimeout: const Duration(milliseconds: 50),
+            resetTimeout: const Duration(milliseconds: 100),
             halfOpenSuccessThreshold: 2,
           ),
+          retry: RetryConfig(maxAttempts: 1),
+          throttling: ThrottlingConfig(minRequests: 100),
         ),
       );
       child = Resource(
@@ -108,9 +110,11 @@ void main() {
         config: ResourceConfig(
           circuitBreaker: CircuitBreakerConfig(
             consecutiveFailuresThreshold: 2,
-            resetTimeout: const Duration(milliseconds: 50),
+            resetTimeout: const Duration(milliseconds: 100),
             halfOpenSuccessThreshold: 1,
           ),
+          retry: RetryConfig(maxAttempts: 1),
+          throttling: ThrottlingConfig(minRequests: 100),
         ),
       );
       parentOp = Operation('parentOp', parent);
@@ -192,8 +196,8 @@ void main() {
         throwsA(isA<CircuitBreakerOpenException>()),
       );
 
-      // Wait for reset timeout of parent (50ms)
-      await Future.delayed(const Duration(milliseconds: 60));
+      // Wait for reset timeout of parent (100ms)
+      await Future.delayed(const Duration(milliseconds: 120));
 
       // Parent reset timeout expired. Child request should be allowed as trial for parent.
       // Parent needs 2 successes to close (halfOpenSuccessThreshold: 2).
@@ -226,7 +230,7 @@ void main() {
       } catch (_) {}
 
       // Wait for reset timeout
-      await Future.delayed(const Duration(milliseconds: 60));
+      await Future.delayed(const Duration(milliseconds: 120));
 
       // Start a slow trial on child
       final trialCompleter = Completer<String>();

@@ -39,6 +39,10 @@ final class CancellationToken {
   ///
   /// When [parent] is cancelled, this token will automatically be cancelled.
   void attach(CancellationToken parent) {
+    if (identical(this, parent)) {
+      throw ArgumentError('Cannot attach a CancellationToken to itself');
+    }
+    if (_isCancelled) return;
     if (parent.isCancelled) {
       cancel();
       return;

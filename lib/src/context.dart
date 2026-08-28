@@ -72,11 +72,12 @@ final class ResourceConfig {
     ThrottlingConfig? throttling,
     HedgingConfig? hedging,
     this.timeout,
-    this.failureClassifier = _defaultFailureClassifier,
+    bool Function(Object)? failureClassifier,
   }) : circuitBreaker = circuitBreaker ?? CircuitBreakerConfig(),
        retry = retry ?? RetryConfig(),
        throttling = throttling ?? ThrottlingConfig(),
-       hedging = hedging ?? HedgingConfig() {
+       hedging = hedging ?? HedgingConfig(),
+       failureClassifier = failureClassifier ?? _defaultFailureClassifier {
     if (timeout != null && timeout! <= Duration.zero) {
       throw ArgumentError.value(timeout, 'timeout', 'must be positive');
     }
@@ -291,8 +292,8 @@ final class RetryConfig {
   /// - [maxAttempts] is < 1
   /// - [baseDelay] is negative
   /// - [maxDelay] is less than [baseDelay]
-  /// - [backoffFactor] is < 1.0
-  /// - [retryBudgetRatio] is not in [0.0, 1.0]
+  /// - [backoffFactor] is < 1.0 or not finite
+  /// - [retryBudgetRatio] is not in `[0.0, 1.0]` or not finite
   /// - [budgetWindow] is not positive
   /// - [minRequestsForBudget] is negative
   RetryConfig({
@@ -322,18 +323,20 @@ final class RetryConfig {
         'must be >= baseDelay ($baseDelay)',
       );
     }
-    if (backoffFactor < 1.0) {
+    if (!backoffFactor.isFinite || backoffFactor < 1.0) {
       throw ArgumentError.value(
         backoffFactor,
         'backoffFactor',
-        'must be >= 1.0',
+        'must be a finite number >= 1.0',
       );
     }
-    if (retryBudgetRatio < 0.0 || retryBudgetRatio > 1.0) {
+    if (!retryBudgetRatio.isFinite ||
+        retryBudgetRatio < 0.0 ||
+        retryBudgetRatio > 1.0) {
       throw ArgumentError.value(
         retryBudgetRatio,
         'retryBudgetRatio',
-        'must be in [0.0, 1.0]',
+        'must be a finite number in [0.0, 1.0]',
       );
     }
     if (budgetWindow <= Duration.zero) {
@@ -422,11 +425,15 @@ final class ThrottlingConfig {
              ? 1.1
              : k * (1.0 - 0.4 * spread),
        ) {
-    if (k < 1.0) {
-      throw ArgumentError.value(k, 'k', 'must be >= 1.0');
+    if (!k.isFinite || k < 1.0) {
+      throw ArgumentError.value(k, 'k', 'must be a finite number >= 1.0');
     }
-    if (spread < 0.0) {
-      throw ArgumentError.value(spread, 'spread', 'must be >= 0.0');
+    if (!spread.isFinite || spread < 0.0) {
+      throw ArgumentError.value(
+        spread,
+        'spread',
+        'must be a finite number >= 0.0',
+      );
     }
     if (windowDuration <= Duration.zero) {
       throw ArgumentError.value(
@@ -442,31 +449,40 @@ final class ThrottlingConfig {
 
   /// Creates a [ThrottlingConfig] with explicit K values for each criticality.
   ///
-  /// Throws [ArgumentError] if any K value is < 1.0 or [windowDuration] is not positive.
+  /// Throws [ArgumentError] if any K value is < 1.0 or not finite,
+  /// [windowDuration] is not positive, or [minRequests] is < 0.
   ThrottlingConfig.withCriticality({
     required this.k,
     this.windowDuration = const Duration(minutes: 2),
     this.minRequests = 0,
   }) {
-    if (k.criticalPlus < 1.0) {
+    if (!k.criticalPlus.isFinite || k.criticalPlus < 1.0) {
       throw ArgumentError.value(
         k.criticalPlus,
         'k.criticalPlus',
-        'must be >= 1.0',
+        'must be a finite number >= 1.0',
       );
     }
-    if (k.critical < 1.0) {
-      throw ArgumentError.value(k.critical, 'k.critical', 'must be >= 1.0');
+    if (!k.critical.isFinite || k.critical < 1.0) {
+      throw ArgumentError.value(
+        k.critical,
+        'k.critical',
+        'must be a finite number >= 1.0',
+      );
     }
-    if (k.sheddablePlus < 1.0) {
+    if (!k.sheddablePlus.isFinite || k.sheddablePlus < 1.0) {
       throw ArgumentError.value(
         k.sheddablePlus,
         'k.sheddablePlus',
-        'must be >= 1.0',
+        'must be a finite number >= 1.0',
       );
     }
-    if (k.sheddable < 1.0) {
-      throw ArgumentError.value(k.sheddable, 'k.sheddable', 'must be >= 1.0');
+    if (!k.sheddable.isFinite || k.sheddable < 1.0) {
+      throw ArgumentError.value(
+        k.sheddable,
+        'k.sheddable',
+        'must be a finite number >= 1.0',
+      );
     }
     if (windowDuration <= Duration.zero) {
       throw ArgumentError.value(
@@ -550,14 +566,15 @@ final class HedgingConfig {
   /// Creates a [HedgingConfig].
   ///
   /// Throws [ArgumentError] if:
-  /// - [delay], [minDelay], or [maxDelay] is negative
-  /// - [minDelay] is greater than [maxDelay]
-  /// - [dynamicPercentile] is non-null and not in [0.0, 1.0]
-  /// - [delayMultiplier] is not positive
-  /// - [adaptationRate] is not positive
-  /// - [overloadPercentile] is not in [0.0, 1.0]
-  /// - [maxOverloadTokens] is < 0
-  /// - [maxConcurrentHedges] is < 0
+  /// - [delay] is negative
+  /// - [minDelay] is not positive
+  /// - [maxDelay] is less than [minDelay]
+  /// - [dynamicPercentile] is non-null and not a finite number in (0.0, 1.0)
+  /// - [delayMultiplier] is not positive or not finite
+  /// - [adaptationRate] is not positive, not finite, or not > `1.0 - dynamicPercentile`
+  /// - [overloadPercentile] is not a finite number in `[0.0, 1.0]`
+  /// - [maxOverloadTokens] is < 1.0 or not finite
+  /// - [maxConcurrentHedges] is < 1
   HedgingConfig({
     this.delay = const Duration(milliseconds: 500),
     this.enabled = false,
@@ -573,68 +590,68 @@ final class HedgingConfig {
     if (delay < Duration.zero) {
       throw ArgumentError.value(delay, 'delay', 'must be >= Duration.zero');
     }
-    if (minDelay < Duration.zero) {
+    if (minDelay <= Duration.zero) {
       throw ArgumentError.value(
         minDelay,
         'minDelay',
-        'must be >= Duration.zero',
+        'must be > Duration.zero',
       );
     }
-    if (maxDelay < Duration.zero) {
+    if (maxDelay < minDelay) {
       throw ArgumentError.value(
         maxDelay,
         'maxDelay',
-        'must be >= Duration.zero',
-      );
-    }
-    if (minDelay > maxDelay) {
-      throw ArgumentError.value(
-        minDelay,
-        'minDelay',
-        'must be <= maxDelay ($maxDelay)',
+        'must be >= minDelay ($minDelay)',
       );
     }
     if (dynamicPercentile != null &&
-        (dynamicPercentile! < 0.0 || dynamicPercentile! > 1.0)) {
+        (!dynamicPercentile!.isFinite ||
+            dynamicPercentile! <= 0.0 ||
+            dynamicPercentile! >= 1.0)) {
       throw ArgumentError.value(
         dynamicPercentile,
         'dynamicPercentile',
-        'must be in [0.0, 1.0]',
+        'must be a finite number in (0.0, 1.0)',
       );
     }
-    if (delayMultiplier <= 0.0) {
+    if (!delayMultiplier.isFinite || delayMultiplier <= 0.0) {
       throw ArgumentError.value(
         delayMultiplier,
         'delayMultiplier',
-        'must be positive',
+        'must be a finite positive number',
       );
     }
-    if (adaptationRate <= 0.0) {
+    if (!adaptationRate.isFinite ||
+        adaptationRate <= 0.0 ||
+        (dynamicPercentile != null &&
+            adaptationRate <= (1.0 - dynamicPercentile!))) {
       throw ArgumentError.value(
         adaptationRate,
         'adaptationRate',
-        'must be positive',
+        'must be a finite positive number > (1.0 - dynamicPercentile) to ensure stochastic convergence',
       );
     }
-    if (overloadPercentile < 0.0 || overloadPercentile > 1.0) {
+    if (!overloadPercentile.isFinite ||
+        overloadPercentile < 0.0 ||
+        overloadPercentile > 1.0) {
       throw ArgumentError.value(
         overloadPercentile,
         'overloadPercentile',
-        'must be in [0.0, 1.0]',
+        'must be a finite number in [0.0, 1.0]',
       );
     }
-    if (maxOverloadTokens < 0.0) {
+    if (!maxOverloadTokens.isFinite || maxOverloadTokens < 1.0) {
       throw ArgumentError.value(
         maxOverloadTokens,
         'maxOverloadTokens',
-        'must be >= 0',
+        'must be a finite number >= 1.0',
       );
     }
-    if (maxConcurrentHedges < 0) {
+    if (maxConcurrentHedges < 1) {
       throw ArgumentError.value(
         maxConcurrentHedges,
         'maxConcurrentHedges',
-        'must be >= 0',
+        'must be >= 1',
       );
     }
   }
@@ -700,8 +717,12 @@ final class ResilienceContext {
   static DateTime? get currentDeadline => Zone.current[#_deadline] as DateTime?;
 
   /// Runs [action] within a zone that has the specified [deadline].
+  ///
+  /// If an outer deadline already exists, the earlier of the two deadlines is used.
   static R runWithDeadline<R>(DateTime deadline, R Function() action) {
-    return runZoned(action, zoneValues: {#_deadline: deadline});
+    final parent = currentDeadline;
+    final effective = _mergeDeadlines(parent, deadline)!;
+    return runZoned(action, zoneValues: {#_deadline: effective});
   }
 
   /// Runs [action] within a zone that has the specified [token].
@@ -736,8 +757,8 @@ final class ResilienceContext {
     }
     if (state.circuitState == CircuitState.open) {
       final now = DateTime.now();
-      if (state.lastFailureTime != null &&
-          now.difference(state.lastFailureTime!) > config.resetTimeout) {
+      final failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.difference(failureTime) > config.resetTimeout) {
         return _CheckResult.allowedStartTrial;
       }
       return _CheckResult.blockedOpen;
@@ -922,6 +943,7 @@ final class ResilienceContext {
     }
 
     Timer? timeoutTimer;
+    bool recordedTimeoutFailure = false;
     try {
       // Check if already cancelled
       if (executionToken.isCancelled) {
@@ -988,6 +1010,11 @@ final class ResilienceContext {
         if (!attemptStatesToRecord.contains(state)) {
           attemptStatesToRecord.add(state);
         }
+        for (final s in attemptStatesToRecord) {
+          if (!statesToRecord.contains(s)) {
+            statesToRecord.add(s);
+          }
+        }
 
         try {
           final result = await executeWithHedging(
@@ -1008,17 +1035,14 @@ final class ResilienceContext {
           if (!topLevelCancel.isCompleted &&
               e is! OperationCancelledException) {
             if (execConfig.failureClassifier(e)) {
+              if (e is ResilienceTimeoutException) {
+                recordedTimeoutFailure = true;
+              }
               for (final s in attemptStatesToRecord) {
                 final cb = CircuitBreaker(s.config, s);
                 cb.recordFailure();
               }
               state.recordRequest(false, operation.criticality);
-            } else {
-              for (final s in attemptStatesToRecord) {
-                final cb = CircuitBreaker(s.config, s);
-                cb.recordSuccess();
-              }
-              state.recordRequest(true, operation.criticality);
             }
           }
           rethrow;
@@ -1033,6 +1057,7 @@ final class ResilienceContext {
           retryOn: (e) {
             if (e is OperationCancelledException) return false;
             if (e is CircuitBreakerOpenException) return false;
+            if (e is ResilienceTimeoutException) return false;
             return retryOn?.call(e) ?? true;
           },
         ),
@@ -1066,7 +1091,7 @@ final class ResilienceContext {
       ]);
       return result;
     } catch (e) {
-      if (e is ResilienceTimeoutException) {
+      if (e is ResilienceTimeoutException && !recordedTimeoutFailure) {
         for (final s in statesToRecord) {
           final cb = CircuitBreaker(s.config, s);
           cb.recordFailure();
@@ -1178,8 +1203,12 @@ class ResourceState {
   /// The current estimate for the hedging delay.
   ///
   /// If dynamic hedging is disabled, returns the static delay.
-  Duration get dynamicDelayEstimate =>
-      _dynamicDelayEstimate ?? config.hedging.delay;
+  Duration get dynamicDelayEstimate {
+    if (config.hedging.dynamicPercentile == null) {
+      return config.hedging.delay;
+    }
+    return _dynamicDelayEstimate ?? config.hedging.delay;
+  }
 
   /// Creates a [ResourceState] with the initial configuration.
   ResourceState(this._config) {
@@ -1239,7 +1268,7 @@ class ResourceState {
       newUs = currentUs * (1.0 - ((1.0 - p) / r));
     }
 
-    final minUs = hedgingConfig.minDelay.inMicroseconds.toDouble();
+    final minUs = max(hedgingConfig.minDelay.inMicroseconds.toDouble(), 1.0);
     final maxUs = hedgingConfig.maxDelay.inMicroseconds.toDouble();
     newUs = newUs.clamp(minUs, maxUs);
 
@@ -1303,7 +1332,7 @@ class ResourceState {
   double getThrottlingRejectionProbability(Criticality criticality) {
     cleanHistory(DateTime.now());
     final requests = getThrottlingRequests(criticality);
-    if (requests == 0) return 0.0;
+    if (requests < config.throttling.minRequests || requests == 0) return 0.0;
     final accepts = getThrottlingAccepts(criticality);
     final kVal = config.throttling.getK(criticality);
     return max(0.0, (requests - kVal * accepts) / (requests + 1));

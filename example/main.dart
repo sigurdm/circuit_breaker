@@ -39,9 +39,9 @@ void main() async {
   final myService = Resource(
     'my-service',
     config: ResourceConfig(
-      // 1. Circuit Breaker: Trip after 3 consecutive failures, retry after 2 seconds
+      // 1. Circuit Breaker: Trip after 6 consecutive failures, retry after 2 seconds
       circuitBreaker: CircuitBreakerConfig(
-        consecutiveFailuresThreshold: 3,
+        consecutiveFailuresThreshold: 6,
         resetTimeout: Duration(seconds: 2),
         halfOpenSuccessThreshold: 1,
       ),

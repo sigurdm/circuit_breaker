@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'context.dart';
 
 /// Executes an operation with request hedging.
@@ -71,8 +72,10 @@ Future<T> executeWithHedging<T>(
     return await f1;
   }
 
-  registerSample(isSlow: true);
-  earlyRegTimer?.cancel();
+  if (stopwatch.elapsed >= rawV) {
+    registerSample(isSlow: true);
+    earlyRegTimer?.cancel();
+  }
 
   bool startedHedge = false;
   Future<T>? f2;
@@ -82,6 +85,10 @@ Future<T> executeWithHedging<T>(
       f2 = operation(c2);
     } catch (e) {
       state.hedgeCompleted();
+      state.hedgingTokens = min(
+        hedgingConfig.maxOverloadTokens,
+        state.hedgingTokens + 1.0,
+      );
       rethrow;
     }
   }
@@ -106,6 +113,7 @@ Future<T> executeWithHedging<T>(
     source
         .then((value) {
           if (!resultCompleter.isCompleted) {
+            earlyRegTimer?.cancel();
             final elapsed = stopwatch.elapsed;
             final latency = elapsed - startTime;
             registerSample(isSlow: latency > rawV);
@@ -121,6 +129,7 @@ Future<T> executeWithHedging<T>(
           lastError = error;
           lastStackTrace = stackTrace;
           if (failures == 2 && !resultCompleter.isCompleted) {
+            earlyRegTimer?.cancel();
             resultCompleter.completeError(lastError!, lastStackTrace);
           }
         })

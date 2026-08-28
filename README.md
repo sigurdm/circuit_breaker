@@ -21,7 +21,7 @@ The repository includes an interactive terminal dashboard simulator that lets yo
 dart run example/simulator.dart
 ```
 
-For more details on the simulator controls and scenarios, see the [Simulator README](file:///usr/local/google/home/sigurdm/projects/circuit_breaker/example/README.md).
+For more details on the simulator controls and scenarios, see the [Simulator README](example/README.md).
 
 ## Core Concepts
 
@@ -148,7 +148,7 @@ void main() async {
       final work = makeNetworkCall();
       return await Future.any([
         work,
-        cancelSignal.future.then((_) => throw Exception('Cancelled')),
+        cancelSignal.future.then((_) => throw const OperationCancelledException()),
       ]);
     });
     print(result);
@@ -372,7 +372,7 @@ If Hedging wrapped Retry, starting a hedge would initiate a second parallel retr
 ### How Metrics Interact
 
 To maintain accurate health metrics:
-*   **Throttling & CB** record results for *every actual attempt* (including retries and individual hedges) that completes. Cancelled hedges are ignored.
+*   **Throttling & CB** record results at the logical attempt level. If a primary attempt fails but a speculative hedge succeeds, the overall attempt is recorded as a success, preventing false-positive circuit breaker trips. If both primary and hedge fail, a single failure is recorded.
 *   **Retry Budget** only counts *logical retries* initiated by the Retry loop. Speculative hedge attempts do not consume the retry budget.
 *   **CB-Blocked Requests** do not record failures in Throttling, ensuring that local fast-fails do not pollute throttling metrics.
 

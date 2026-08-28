@@ -9,12 +9,19 @@ import 'context.dart';
 /// This class calculates the probability of throttling a request based on the
 /// Google SRE adaptive throttling formula.
 ///
-/// This is an internal implementation detail and is not exported in the public API.
+/// Implements Adaptive Throttling based on the Google SRE adaptive throttling algorithm.
 final class AdaptiveThrottler {
   final ResourceConfig config;
   final ResourceState state;
 
+  /// Creates an [AdaptiveThrottler] with the given [config] and [state].
   AdaptiveThrottler(this.config, this.state);
+
+  /// Creates a standalone [AdaptiveThrottler] with optional [config].
+  factory AdaptiveThrottler.standalone({ThrottlingConfig? config}) {
+    final cfg = ResourceConfig(throttling: config ?? ThrottlingConfig());
+    return AdaptiveThrottler(cfg, ResourceState(cfg));
+  }
 
   static final Random _random = Random();
 
@@ -38,6 +45,19 @@ final class AdaptiveThrottler {
 
     return _random.nextDouble() < p;
   }
+
+  /// Records a request outcome (accepted or failed) for adaptive throttling metrics.
+  void recordRequest(
+    bool accepted, [
+    Criticality criticality = Criticality.critical,
+  ]) {
+    state.recordRequest(accepted, criticality);
+  }
+
+  /// Returns the current rejection probability for [criticality].
+  double rejectionProbability(Criticality criticality) {
+    return state.getThrottlingRejectionProbability(criticality);
+  }
 }
 
 /// Exception thrown when a request is throttled by the client.
@@ -45,8 +65,6 @@ final class AdaptiveThrottler {
 /// This occurs when the adaptive throttling mechanism determines that the
 /// backend is overloaded based on recent success/failure history, and
 /// proactively rejects the request to avoid adding load.
-///
-/// {@example example/throttling_example.dart}
 final class ThrottledException implements Exception {
   /// Message describing the reason for throttling.
   final String message;

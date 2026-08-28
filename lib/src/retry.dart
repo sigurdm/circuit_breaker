@@ -44,6 +44,14 @@ Future<T> executeWithRetry<T>(
         rethrow;
       }
 
+      // Check if deadline is already exceeded
+      final currentDeadline = ResilienceContext.currentDeadline;
+      if (currentDeadline != null && DateTime.now().isAfter(currentDeadline)) {
+        throw ResilienceTimeoutException(
+          'Deadline exceeded before retry attempt',
+        );
+      }
+
       // Calculate delay with exponential backoff and full jitter
       final delay = _calculateDelay(attempts, retryConfig);
 
