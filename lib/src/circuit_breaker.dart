@@ -63,7 +63,7 @@ final class CircuitBreaker {
       recordSuccess();
       return result;
     } catch (e) {
-      if (config.failureClassifier(e)) {
+      if (safeClassify(config.failureClassifier, e)) {
         recordFailure();
       } else if (state.circuitState == CircuitState.halfOpen) {
         state.trialRequestInProgress = false;
@@ -84,7 +84,12 @@ final class CircuitBreaker {
 
     if (state.circuitState == CircuitState.open) {
       final now = DateTime.now();
-      final failureTime = state.lastFailureTime ?? state.lastStateChange;
+      var failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.isBefore(failureTime)) {
+        failureTime = now;
+        if (state.lastFailureTime != null) state.lastFailureTime = now;
+        state.lastStateChange = now;
+      }
       if (now.difference(failureTime) > cbConfig.resetTimeout) {
         // Transition to half-open and start trial
         state.circuitState = CircuitState.halfOpen;

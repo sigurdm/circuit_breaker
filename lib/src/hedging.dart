@@ -22,7 +22,14 @@ Future<T> executeWithHedging<T>(
   final c2 = Completer<void>();
 
   final stopwatch = Stopwatch()..start();
-  final f1 = operation(c1);
+  final Future<T> f1;
+  try {
+    f1 = operation(c1);
+  } catch (e) {
+    if (!c1.isCompleted) c1.complete();
+    if (!c2.isCompleted) c2.complete();
+    rethrow;
+  }
 
   final rawV = state.dynamicDelayEstimate;
   final actualHedgingDelay = hedgingConfig.dynamicPercentile != null
@@ -58,9 +65,11 @@ Future<T> executeWithHedging<T>(
       if (!delayCompleter.isCompleted) delayCompleter.complete();
     } else {
       unawaited(
-        currentToken.onCancelled.then((_) {
-          if (!delayCompleter.isCompleted) delayCompleter.complete();
-        }),
+        currentToken.onCancelled
+            .then((_) {
+              if (!delayCompleter.isCompleted) delayCompleter.complete();
+            })
+            .catchError((_, __) {}),
       );
     }
   }
@@ -139,14 +148,18 @@ Future<T> executeWithHedging<T>(
   final resultCompleter = Completer<T>();
   if (currentToken != null) {
     unawaited(
-      currentToken.onCancelled.then((_) {
-        earlyRegTimer?.cancel();
-        if (!c1.isCompleted) c1.complete();
-        if (!c2.isCompleted) c2.complete();
-        if (!resultCompleter.isCompleted) {
-          resultCompleter.completeError(const OperationCancelledException());
-        }
-      }),
+      currentToken.onCancelled
+          .then((_) {
+            earlyRegTimer?.cancel();
+            if (!c1.isCompleted) c1.complete();
+            if (!c2.isCompleted) c2.complete();
+            if (!resultCompleter.isCompleted) {
+              resultCompleter.completeError(
+                const OperationCancelledException(),
+              );
+            }
+          })
+          .catchError((_, __) {}),
     );
   }
   int failures = 0;

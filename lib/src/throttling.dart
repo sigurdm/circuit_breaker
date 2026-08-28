@@ -15,9 +15,15 @@ final class AdaptiveThrottler {
   /// Creates an [AdaptiveThrottler] with the given [config] and [state].
   AdaptiveThrottler(this.config, this.state);
 
-  /// Creates a standalone [AdaptiveThrottler] with optional [config].
-  factory AdaptiveThrottler.standalone({ThrottlingConfig? config}) {
-    final cfg = ResourceConfig(throttling: config ?? ThrottlingConfig());
+  /// Creates a standalone [AdaptiveThrottler] with optional [config] and [failureClassifier].
+  factory AdaptiveThrottler.standalone({
+    ThrottlingConfig? config,
+    bool Function(Object)? failureClassifier,
+  }) {
+    final cfg = ResourceConfig(
+      throttling: config ?? ThrottlingConfig(),
+      failureClassifier: failureClassifier,
+    );
     return AdaptiveThrottler(cfg, ResourceState(cfg));
   }
 
@@ -56,7 +62,7 @@ final class AdaptiveThrottler {
       recordRequest(true, criticality);
       return result;
     } catch (e) {
-      if (config.failureClassifier(e)) {
+      if (safeClassify(config.failureClassifier, e)) {
         recordRequest(false, criticality);
       }
       rethrow;

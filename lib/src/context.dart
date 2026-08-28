@@ -38,6 +38,16 @@ bool _defaultFailureClassifier(Object e) {
   return true;
 }
 
+/// Safely evaluates [classifier] on [e], falling back to [_defaultFailureClassifier]
+/// if [classifier] throws.
+bool safeClassify(bool Function(Object) classifier, Object e) {
+  try {
+    return classifier(e);
+  } catch (_) {
+    return _defaultFailureClassifier(e);
+  }
+}
+
 final class ResourceConfig {
   /// Configuration for the circuit breaker mechanism.
   final CircuitBreakerConfig circuitBreaker;
@@ -741,6 +751,10 @@ final class ResilienceContext {
     CancellationToken token,
     R Function() action,
   ) {
+    final parent = currentCancellationToken;
+    if (parent != null) {
+      token.attach(parent);
+    }
     return runZoned(action, zoneValues: {#_cancellationToken: token});
   }
 
@@ -768,7 +782,12 @@ final class ResilienceContext {
     }
     if (state.circuitState == CircuitState.open) {
       final now = DateTime.now();
-      final failureTime = state.lastFailureTime ?? state.lastStateChange;
+      var failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.isBefore(failureTime)) {
+        failureTime = now;
+        if (state.lastFailureTime != null) state.lastFailureTime = now;
+        state.lastStateChange = now;
+      }
       if (now.difference(failureTime) > config.resetTimeout) {
         return _CheckResult.allowedStartTrial;
       }
@@ -972,11 +991,13 @@ final class ResilienceContext {
 
       final topLevelCancel = Completer<Exception>();
       unawaited(
-        executionToken.onCancelled.then((_) {
-          if (!topLevelCancel.isCompleted) {
-            topLevelCancel.complete(const OperationCancelledException());
-          }
-        }),
+        executionToken.onCancelled
+            .then((_) {
+              if (!topLevelCancel.isCompleted) {
+                topLevelCancel.complete(const OperationCancelledException());
+              }
+            })
+            .catchError((_, __) {}),
       );
 
       Future<T> singleAttempt(Completer<void> cancel) async {
@@ -1042,7 +1063,7 @@ final class ResilienceContext {
             state: state,
           );
 
-          if (!topLevelCancel.isCompleted) {
+          if (!topLevelCancel.isCompleted && !executionToken.isCancelled) {
             for (final s in attemptStatesToRecord) {
               final cb = CircuitBreaker(s.config, s);
               cb.recordSuccess();
@@ -1051,9 +1072,10 @@ final class ResilienceContext {
           }
           return result;
         } catch (e) {
-          if (!topLevelCancel.isCompleted &&
-              e is! OperationCancelledException) {
-            if (execConfig.failureClassifier(e)) {
+          final isCancelled =
+              executionToken.isCancelled || topLevelCancel.isCompleted;
+          if (!isCancelled && e is! OperationCancelledException) {
+            if (safeClassify(execConfig.failureClassifier, e)) {
               if (e is ResilienceTimeoutException) {
                 recordedTimeoutFailure = true;
               }
@@ -1131,7 +1153,7 @@ final class ResilienceContext {
     } catch (e) {
       if (e is ResilienceTimeoutException &&
           !recordedTimeoutFailure &&
-          execConfig.failureClassifier(e)) {
+          safeClassify(execConfig.failureClassifier, e)) {
         for (final s in statesToRecord) {
           final cb = CircuitBreaker(s.config, s);
           cb.recordFailure();
@@ -1342,13 +1364,21 @@ class ResourceState {
   void cleanHistory(DateTime now) {
     final cutoff = now.subtract(config.throttling.windowDuration);
     for (final history in requestHistory.values) {
-      history.removeWhere((record) => record.timestamp.isBefore(cutoff));
+      if (history.isEmpty) continue;
+      history.removeWhere(
+        (record) =>
+            record.timestamp.isBefore(cutoff) || record.timestamp.isAfter(now),
+      );
     }
 
     final retryCutoff = now.subtract(config.retry.budgetWindow);
-    retryHistory.removeWhere(
-      (record) => record.timestamp.isBefore(retryCutoff),
-    );
+    if (retryHistory.isNotEmpty) {
+      retryHistory.removeWhere(
+        (record) =>
+            record.timestamp.isBefore(retryCutoff) ||
+            record.timestamp.isAfter(now),
+      );
+    }
   }
 
   /// Returns the number of requests in the retry budget window.
