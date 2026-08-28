@@ -20,6 +20,9 @@ void main() {
       expect(policy.config.retry.maxAttempts, equals(2));
       expect(policy.config.timeout, equals(const Duration(seconds: 5)));
       expect(policy.state, isA<ResourceState>());
+      expect(policy.resource, isA<Resource>());
+      expect(policy.circuitBreaker, isA<CircuitBreaker>());
+      expect(policy.throttler, isA<AdaptiveThrottler>());
     });
 
     test('executes successfully and returns result', () async {
@@ -29,6 +32,21 @@ void main() {
       expect(result, equals('success'));
       expect(policy.circuitState, equals(CircuitState.closed));
       expect(policy.failureCount, equals(0));
+    });
+
+    test('executes with non-critical criticality level', () async {
+      final policy = ResiliencePolicy();
+      final res1 = await policy.execute(
+        () async => 'sheddable-ok',
+        criticality: Criticality.sheddable,
+      );
+      expect(res1, equals('sheddable-ok'));
+
+      final res2 = await policy.executeCancelable(
+        (cancel) async => 'sheddable-cancelable-ok',
+        criticality: Criticality.sheddable,
+      );
+      expect(res2, equals('sheddable-cancelable-ok'));
     });
 
     test('separate policies have independent state', () async {

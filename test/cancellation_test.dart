@@ -33,6 +33,17 @@ void main() {
       child.cancel();
       // Should be detached now, parent cancellation shouldn't affect it
     });
+
+    test('attach to already-cancelled parent immediately cancels child', () {
+      final parent = CancellationToken();
+      parent.cancel();
+
+      final child = CancellationToken();
+      expect(child.isCancelled, isFalse);
+
+      child.attach(parent);
+      expect(child.isCancelled, isTrue);
+    });
   });
 
   group('ResilienceContext CancellationToken Leak Tests', () {

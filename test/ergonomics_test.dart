@@ -193,6 +193,14 @@ void main() {
 
       final result = await bound.execute(() async => 'bound-legacy');
       expect(result, equals('bound-legacy'));
+
+      final parentRes = Resource('parent');
+      final childRes = Resource('child', parent: parentRes);
+      final boundChild = context.bind(childRes);
+      expect(boundChild.parent, equals(parentRes));
+      expect(boundChild.criticality, equals(Criticality.critical));
+      expect(boundChild.hedgingOverride, isNull);
+      expect(boundChild.retryOverride, isNull);
     });
 
     test('BoundResource.wrap and wrapUnary', () async {
