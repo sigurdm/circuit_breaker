@@ -9,17 +9,22 @@
 /// - **Retry with Backoff**: Automatically retries transient failures with exponential backoff and full jitter.
 /// - **Request Hedging**: Mitigates tail latency by speculatively duplicating operations.
 /// - **Adaptive Throttling**: Dynamically rejects requests based on rolling success rates to protect backends.
+/// - **Composite Policy**: Combines all resilience patterns in a standalone [ResiliencePolicy].
 ///
 /// ## Usage
 ///
 /// The main entry point is [ResilienceContext]. You can use it to execute operations
-/// with configured policies for named resources.
+/// with configured policies for named resources. Alternatively, standalone policies
+/// ([ResiliencePolicy], [CircuitBreaker], [AdaptiveThrottler], [Retry], [RequestHedger],
+/// or top-level [retry]) can be used for progressive adoption with zero boilerplate.
 /// See `example/main.dart` for a complete end-to-end example.
 library circuit_breaker;
 
 export 'src/context.dart'
     show
         ResilienceContext,
+        ResilienceTarget,
+        BoundResource,
         Resource,
         Operation,
         Criticality,
@@ -37,6 +42,9 @@ export 'src/cancellation.dart' show CancellationToken;
 
 export 'src/circuit_breaker.dart' show CircuitBreaker;
 export 'src/throttling.dart' show AdaptiveThrottler, ThrottledException;
+export 'src/retry.dart' show Retry, retry;
+export 'src/hedging.dart' show RequestHedger;
+export 'src/policy.dart' show ResiliencePolicy;
 export 'src/exceptions.dart'
     show
         CircuitBreakerOpenException,

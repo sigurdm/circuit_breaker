@@ -69,6 +69,20 @@ final class AdaptiveThrottler {
     }
   }
 
+  /// Wraps [action] returning a function protected by adaptive throttling.
+  Future<T> Function() wrap<T>(
+    Future<T> Function() action, {
+    Criticality criticality = Criticality.critical,
+  }) =>
+      () => execute(action, criticality: criticality);
+
+  /// Wraps a unary function [action] returning a function protected by adaptive throttling.
+  Future<T> Function(A) wrapUnary<T, A>(
+    Future<T> Function(A) action, {
+    Criticality criticality = Criticality.critical,
+  }) =>
+      (A arg) => execute(() => action(arg), criticality: criticality);
+
   /// Returns the current rejection probability for [criticality].
   double rejectionProbability(Criticality criticality) {
     return state.getThrottlingRejectionProbability(criticality);

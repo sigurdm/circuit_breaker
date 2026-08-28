@@ -31,10 +31,21 @@ final class CircuitBreaker {
     return CircuitBreaker(cfg, ResourceState(cfg));
   }
 
+  static final Object _trialZoneKey = Object();
+
   /// Executes [action] protected by this circuit breaker.
   ///
   /// Throws [CircuitBreakerOpenException] if the circuit is open.
   Future<T> execute<T>(Future<T> Function() action) async {
+    final isReentrantTrial =
+        state.circuitState == CircuitState.halfOpen &&
+        Zone.current[_trialZoneKey] == state;
+
+    if (isReentrantTrial) {
+      // Allow re-entrant execution within the same trial without consuming extra permits.
+      return await action();
+    }
+
     final bool allowed;
     if (state.circuitState == CircuitState.halfOpen) {
       if (state.isExecutingTrial) {
@@ -54,12 +65,15 @@ final class CircuitBreaker {
       throw CircuitBreakerOpenException('Circuit breaker is open');
     }
 
-    if (state.circuitState == CircuitState.halfOpen) {
+    final isRootTrial = state.circuitState == CircuitState.halfOpen;
+    if (isRootTrial) {
       state.isExecutingTrial = true;
     }
 
     try {
-      final result = await action();
+      final result = await (isRootTrial
+          ? runZoned(action, zoneValues: {_trialZoneKey: state})
+          : action());
       recordSuccess();
       return result;
     } catch (e) {
@@ -70,9 +84,19 @@ final class CircuitBreaker {
       }
       rethrow;
     } finally {
-      state.isExecutingTrial = false;
+      if (isRootTrial) {
+        state.isExecutingTrial = false;
+      }
     }
   }
+
+  /// Wraps [action] returning a function protected by this circuit breaker.
+  Future<T> Function() wrap<T>(Future<T> Function() action) =>
+      () => execute(action);
+
+  /// Wraps a unary function [action] returning a function protected by this circuit breaker.
+  Future<T> Function(A) wrapUnary<T, A>(Future<T> Function(A) action) =>
+      (A arg) => execute(() => action(arg));
 
   /// Checks if the request is allowed to proceed.
   bool get isAllowed {

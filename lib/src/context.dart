@@ -27,7 +27,11 @@ import 'cancellation.dart';
 /// );
 /// ```
 bool _defaultFailureClassifier(Object e) {
-  if (e is OperationCancelledException) return false;
+  if (e is OperationCancelledException ||
+      e is CircuitBreakerOpenException ||
+      e is ThrottledException) {
+    return false;
+  }
   if (e is ArgumentError ||
       e is RangeError ||
       e is FormatException ||
@@ -100,10 +104,27 @@ final class ResourceConfig {
   factory ResourceConfig.defaultConfig() => ResourceConfig();
 }
 
+/// Represents an execution target for resilience policies.
+///
+/// Implemented by [Resource], [Operation], and [BoundResource].
+abstract interface class ResilienceTarget {
+  /// The underlying [Resource] for this target.
+  Resource get resource;
+
+  /// The criticality of operations targeting this resource.
+  Criticality get criticality;
+
+  /// Optional override for hedging configuration.
+  HedgingConfig? get hedgingOverride;
+
+  /// Optional override for retry configuration.
+  RetryConfig? get retryOverride;
+}
+
 /// Represents a remote service or component.
 ///
 /// Resources hold shared state like circuit breakers and throttling history.
-final class Resource {
+final class Resource implements ResilienceTarget {
   /// The name of the resource (e.g., 'users-api').
   final String name;
 
@@ -113,13 +134,47 @@ final class Resource {
   /// The parent resource, if any.
   final Resource? parent;
 
+  @override
+  Resource get resource => this;
+
+  @override
+  Criticality get criticality => Criticality.critical;
+
+  @override
+  HedgingConfig? get hedgingOverride => null;
+
+  @override
+  RetryConfig? get retryOverride => null;
+
   /// Creates a [Resource].
+  ///
+  /// Configuration can be supplied either as a complete [ResourceConfig] object via [config],
+  /// or using individual policy parameters ([circuitBreaker], [retry], [throttling],
+  /// [hedging], [timeout], [failureClassifier]).
   ///
   /// It is an error if:
   /// - [name] is empty.
   /// - There is a cycle in the parent hierarchy.
-  Resource(this.name, {ResourceConfig? config, this.parent})
-    : config = config ?? ResourceConfig() {
+  /// - Both [config] and individual policy configurations are provided.
+  Resource(
+    this.name, {
+    ResourceConfig? config,
+    this.parent,
+    CircuitBreakerConfig? circuitBreaker,
+    RetryConfig? retry,
+    ThrottlingConfig? throttling,
+    HedgingConfig? hedging,
+    Duration? timeout,
+    bool Function(Object)? failureClassifier,
+  }) : config = _resolveConfig(
+         config: config,
+         circuitBreaker: circuitBreaker,
+         retry: retry,
+         throttling: throttling,
+         hedging: hedging,
+         timeout: timeout,
+         failureClassifier: failureClassifier,
+       ) {
     if (name.trim().isEmpty) {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
     }
@@ -133,6 +188,52 @@ final class Resource {
       current = current.parent;
     }
   }
+
+  static ResourceConfig _resolveConfig({
+    ResourceConfig? config,
+    CircuitBreakerConfig? circuitBreaker,
+    RetryConfig? retry,
+    ThrottlingConfig? throttling,
+    HedgingConfig? hedging,
+    Duration? timeout,
+    bool Function(Object)? failureClassifier,
+  }) {
+    final hasIndividual =
+        circuitBreaker != null ||
+        retry != null ||
+        throttling != null ||
+        hedging != null ||
+        timeout != null ||
+        failureClassifier != null;
+    if (config != null && hasIndividual) {
+      throw ArgumentError(
+        'Cannot specify both config and individual policy configurations',
+      );
+    }
+    if (config != null) return config;
+    return ResourceConfig(
+      circuitBreaker: circuitBreaker,
+      retry: retry,
+      throttling: throttling,
+      hedging: hedging,
+      timeout: timeout,
+      failureClassifier: failureClassifier,
+    );
+  }
+
+  /// Creates an [Operation] targeting this resource.
+  Operation operation(
+    String name, {
+    HedgingConfig? hedgingOverride,
+    RetryConfig? retryOverride,
+    Criticality criticality = Criticality.critical,
+  }) => Operation(
+    name,
+    this,
+    hedgingOverride: hedgingOverride,
+    retryOverride: retryOverride,
+    criticality: criticality,
+  );
 }
 
 /// The criticality of a request, as described in the Google SRE book.
@@ -156,20 +257,24 @@ enum Criticality {
 ///
 /// Operations belong to a [Resource] and can have specific overrides
 /// for hedging and retry configurations.
-final class Operation {
+final class Operation implements ResilienceTarget {
   /// The name of the operation (e.g., 'get-user').
   final String name;
 
   /// The resource this operation belongs to.
+  @override
   final Resource resource;
 
   /// Optional override for hedging configuration.
+  @override
   final HedgingConfig? hedgingOverride;
 
   /// Optional override for retry configuration.
+  @override
   final RetryConfig? retryOverride;
 
   /// The criticality of this operation.
+  @override
   final Criticality criticality;
 
   /// Creates an [Operation].
@@ -186,6 +291,81 @@ final class Operation {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
     }
   }
+}
+
+/// A [Resource] bound to a specific [ResilienceContext].
+///
+/// This provides direct execution methods ([execute], [executeCancelable],
+/// [wrap], [wrapUnary]) without needing to pass the resource to the context explicitly.
+final class BoundResource implements ResilienceTarget {
+  /// The context this resource is bound to.
+  final ResilienceContext context;
+
+  /// The underlying [Resource].
+  @override
+  final Resource resource;
+
+  /// Creates a [BoundResource] binding [resource] to [context].
+  BoundResource(this.context, this.resource);
+
+  /// The name of the underlying resource.
+  String get name => resource.name;
+
+  /// The configuration of the underlying resource.
+  ResourceConfig get config => resource.config;
+
+  /// The parent of the underlying resource, if any.
+  Resource? get parent => resource.parent;
+
+  @override
+  Criticality get criticality => resource.criticality;
+
+  @override
+  HedgingConfig? get hedgingOverride => resource.hedgingOverride;
+
+  @override
+  RetryConfig? get retryOverride => resource.retryOverride;
+
+  /// The state of this resource in the bound context.
+  ResourceState get state => context._getState(resource);
+
+  /// Executes an operation on this resource.
+  Future<T> execute<T>(
+    Future<T> Function() action, {
+    bool Function(Object)? retryOn,
+  }) => context.execute(this, action, retryOn: retryOn);
+
+  /// Executes a cancelable operation on this resource.
+  Future<T> executeCancelable<T>(
+    Future<T> Function(Completer<void> cancelCompleter) action, {
+    bool Function(Object)? retryOn,
+  }) => context.executeCancelable(this, action, retryOn: retryOn);
+
+  /// Wraps a nullary function with this resource's resilience policies.
+  Future<T> Function() wrap<T>(
+    Future<T> Function() action, {
+    bool Function(Object)? retryOn,
+  }) => context.wrap(this, action, retryOn: retryOn);
+
+  /// Wraps a unary function with this resource's resilience policies.
+  Future<T> Function(A) wrapUnary<T, A>(
+    Future<T> Function(A) action, {
+    bool Function(Object)? retryOn,
+  }) => context.wrapUnary(this, action, retryOn: retryOn);
+
+  /// Creates an [Operation] on this bound resource.
+  Operation operation(
+    String name, {
+    HedgingConfig? hedgingOverride,
+    RetryConfig? retryOverride,
+    Criticality criticality = Criticality.critical,
+  }) => Operation(
+    name,
+    resource,
+    hedgingOverride: hedgingOverride,
+    retryOverride: retryOverride,
+    criticality: criticality,
+  );
 }
 
 /// Configuration for the Circuit Breaker pattern.
@@ -730,6 +910,34 @@ enum _CheckResult {
 /// }
 /// ```
 final class ResilienceContext {
+  /// The ambient default [ResilienceContext] instance.
+  ///
+  /// Can be used for zero-setup resilience without explicitly creating
+  /// and passing a [ResilienceContext].
+  static final ResilienceContext defaultContext = ResilienceContext();
+
+  /// Runs [action] protected by the policies of [target] using [defaultContext]
+  /// (or `target.context` if [target] is a [BoundResource]).
+  static Future<T> run<T>(
+    ResilienceTarget target,
+    Future<T> Function() action, {
+    bool Function(Object)? retryOn,
+  }) {
+    final ctx = target is BoundResource ? target.context : defaultContext;
+    return ctx.execute(target, action, retryOn: retryOn);
+  }
+
+  /// Runs [action] with cancellation support protected by the policies of [target]
+  /// using [defaultContext] (or `target.context` if [target] is a [BoundResource]).
+  static Future<T> runCancelable<T>(
+    ResilienceTarget target,
+    Future<T> Function(Completer<void> cancelCompleter) action, {
+    bool Function(Object)? retryOn,
+  }) {
+    final ctx = target is BoundResource ? target.context : defaultContext;
+    return ctx.executeCancelable(target, action, retryOn: retryOn);
+  }
+
   /// Gets the current [CancellationToken] from the environment.
   static CancellationToken? get currentCancellationToken =>
       Zone.current[#_cancellationToken] as CancellationToken?;
@@ -762,6 +970,22 @@ final class ResilienceContext {
 
   /// Gets the states for all resources.
   Map<String, ResourceState> get states => _states;
+
+  /// The total number of tracked resource states.
+  int get resourceCount => _states.length;
+
+  /// Returns whether a state exists for [resourceName].
+  bool containsResource(String resourceName) =>
+      _states.containsKey(resourceName);
+
+  /// Removes and evicts the state for [resourceName].
+  ///
+  /// Returns `true` if a state was removed, or `false` if none existed.
+  bool removeResource(String resourceName) =>
+      _states.remove(resourceName) != null;
+
+  /// Clears all tracked resource states.
+  void clearResources() => _states.clear();
 
   /// Gets or creates the state for a specific resource.
   ResourceState _getState(Resource resource) {
@@ -871,21 +1095,70 @@ final class ResilienceContext {
     }
   }
 
+  /// Creates and binds a [Resource] to this context.
+  BoundResource resource(
+    String name, {
+    ResourceConfig? config,
+    Resource? parent,
+    CircuitBreakerConfig? circuitBreaker,
+    RetryConfig? retry,
+    ThrottlingConfig? throttling,
+    HedgingConfig? hedging,
+    Duration? timeout,
+    bool Function(Object)? failureClassifier,
+  }) {
+    final res = Resource(
+      name,
+      config: config,
+      parent: parent,
+      circuitBreaker: circuitBreaker,
+      retry: retry,
+      throttling: throttling,
+      hedging: hedging,
+      timeout: timeout,
+      failureClassifier: failureClassifier,
+    );
+    return BoundResource(this, res);
+  }
+
+  /// Binds an existing [Resource] to this context.
+  BoundResource bind(Resource resource) {
+    return BoundResource(this, resource);
+  }
+
+  /// Wraps [action] with the resilience policies configured for [target].
+  Future<T> Function() wrap<T>(
+    ResilienceTarget target,
+    Future<T> Function() action, {
+    bool Function(Object)? retryOn,
+  }) {
+    return () => execute(target, action, retryOn: retryOn);
+  }
+
+  /// Wraps a unary function [action] with the resilience policies configured for [target].
+  Future<T> Function(A) wrapUnary<T, A>(
+    ResilienceTarget target,
+    Future<T> Function(A) action, {
+    bool Function(Object)? retryOn,
+  }) {
+    return (A arg) => execute(target, () => action(arg), retryOn: retryOn);
+  }
+
   /// Executes an operation with the configured resilience policies.
   ///
   /// Use this version for operations that DO NOT support cancellation.
   /// See [executeCancelable] for operations that support cancellation.
   Future<T> execute<T>(
-    Operation operation,
+    ResilienceTarget target,
     Future<T> Function() action, {
     bool Function(Object)? retryOn,
   }) {
-    return executeCancelable(operation, (_) => action(), retryOn: retryOn);
+    return executeCancelable(target, (_) => action(), retryOn: retryOn);
   }
 
   /// Executes an operation with the configured resilience policies.
   ///
-  /// The [operation] defines which resource this call belongs to and any
+  /// The [target] defines which resource this call belongs to and any
   /// overrides for this specific call.
   ///
   /// The [action] is the async function to execute. It receives a `Completer<void>`
@@ -903,16 +1176,16 @@ final class ResilienceContext {
   /// Throws [ResilienceTimeoutException] if the operation times out.
   /// Rethrows the last exception if all retries fail.
   Future<T> executeCancelable<T>(
-    Operation operation,
+    ResilienceTarget target,
     Future<T> Function(Completer<void> cancelCompleter) action, {
     bool Function(Object)? retryOn,
   }) async {
-    final resource = operation.resource;
+    final resource = target.resource;
     final state = _getState(resource);
 
-    // Fallback chain for configs: Operation Override -> Resource Config -> Default
-    final hedgingConfig = operation.hedgingOverride ?? resource.config.hedging;
-    final retryConfig = operation.retryOverride ?? resource.config.retry;
+    // Fallback chain for configs: Target Override -> Resource Config -> Default
+    final hedgingConfig = target.hedgingOverride ?? resource.config.hedging;
+    final retryConfig = target.retryOverride ?? resource.config.retry;
 
     // We create a temporary config for this execution if there are overrides
     final execConfig = ResourceConfig(
@@ -958,7 +1231,7 @@ final class ResilienceContext {
           state.circuitState == CircuitState.halfOpen ||
           leafRes == _CheckResult.allowedStartTrial;
 
-      if (!isHalfOpen && throttler.shouldThrottle(operation.criticality)) {
+      if (!isHalfOpen && throttler.shouldThrottle(target.criticality)) {
         throw ThrottledException('Request throttled for ${resource.name}');
       }
 
@@ -1068,7 +1341,7 @@ final class ResilienceContext {
               final cb = CircuitBreaker(s.config, s);
               cb.recordSuccess();
             }
-            state.recordRequest(true, operation.criticality);
+            state.recordRequest(true, target.criticality);
           }
           return result;
         } catch (e) {
@@ -1083,7 +1356,7 @@ final class ResilienceContext {
                 final cb = CircuitBreaker(s.config, s);
                 cb.recordFailure();
               }
-              state.recordRequest(false, operation.criticality);
+              state.recordRequest(false, target.criticality);
             }
           }
           rethrow;
@@ -1158,7 +1431,7 @@ final class ResilienceContext {
           final cb = CircuitBreaker(s.config, s);
           cb.recordFailure();
         }
-        state.recordRequest(false, operation.criticality);
+        state.recordRequest(false, target.criticality);
       }
       rethrow;
     } finally {

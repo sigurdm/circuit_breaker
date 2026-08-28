@@ -98,66 +98,99 @@ final parent = Resource('parent-service');
 final child = Resource('child-service', parent: parent);
 ```
 
-## Usage
+## Usage & Progressive Adoption
 
+The package is designed to be adapted piecewise. You can start with a simple one-liner and progressively add patterns as your application grows, with zero wasted boilerplate.
 
+### 1. Zero Boilerplate: Ad-hoc `retry(...)`
 
-### Basic Setup
+For simple operations where you just need exponential backoff and jitter without managing state or circuit breakers:
 
 ```dart
 import 'package:circuit_breaker/circuit_breaker.dart';
 
-void main() async {
-  final context = ResilienceContext();
+final data = await retry(
+  () => fetchUserProfile(userId),
+  maxAttempts: 3,
+  timeout: const Duration(seconds: 5),
+);
+```
 
-  // Define a resource with shared state
-  final myService = Resource(
-    'my-service',
-    config: ResourceConfig(
-      circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
-      throttling: ThrottlingConfig(k: 2.0),
-      timeout: Duration(seconds: 5),
-    ),
-  );
+### 2. Standalone Primitives
 
-  // Define operations
-  final readOp = Operation(
-    'read',
-    myService,
-    hedgingOverride: HedgingConfig(
-      enabled: true,
-      delay: Duration(milliseconds: 200),
-    ),
-  );
-  
-  final writeOp = Operation('write', myService);
+Each resilience pattern can be used as an independent, standalone object:
 
-  // Execute a simple operation
-  try {
-    final result = await context.execute(writeOp, () async {
-      return await makeNetworkCall();
-    });
-    print(result);
-  } catch (e) {
-    print('Operation failed: $e');
-  }
+```dart
+// Standalone Circuit Breaker
+final cb = CircuitBreaker.standalone(
+  config: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
+);
+final user = await cb.execute(() => fetchUser());
 
-  // Execute a cancelable operation (required for hedging/timeouts)
-  try {
-    final result = await context.executeCancelable(readOp, (cancelSignal) async {
-      final work = makeNetworkCall();
-      return await Future.any([
-        work,
-        cancelSignal.future.then((_) => throw const OperationCancelledException()),
-      ]);
-    });
-    print(result);
-  } catch (e) {
-    print('Operation failed: $e');
-  }
-}
+// Standalone Retry with budget tracking
+final retrier = Retry.standalone(
+  maxAttempts: 4,
+  baseDelay: const Duration(milliseconds: 200),
+);
+final result = await retrier.execute(() => callExternalApi());
 
-Future<String> makeNetworkCall() async => 'data';
+// Standalone Request Hedger for tail latency
+final hedger = RequestHedger.standalone(
+  delay: const Duration(milliseconds: 100),
+);
+final fastResult = await hedger.execute(() => readReplica());
+
+// Function decorators (.wrap and .wrapUnary)
+final resilientFetch = cb.wrap(fetchUser);
+final userFromId = cb.wrapUnary<User, String>((id) => fetchUserById(id));
+```
+
+### 3. Standalone Composite Policy (`ResiliencePolicy`)
+
+Combine Circuit Breaker, Retries, Throttling, Hedging, and Timeout into a single self-contained policy without needing a context:
+
+```dart
+final paymentPolicy = ResiliencePolicy(
+  circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 4),
+  retry: RetryConfig(maxAttempts: 3),
+  timeout: const Duration(seconds: 5),
+);
+
+// Execute directly
+final confirmation = await paymentPolicy.execute(() => processPayment());
+
+// Or wrap existing functions
+final decoratedPayment = paymentPolicy.wrap(processPayment);
+```
+
+### 4. Service-Oriented Context & Bound Resources
+
+When coordinating resilience across multiple services and endpoints, use `ResilienceContext`:
+
+```dart
+final context = ResilienceContext();
+
+// Directly bind and configure a resource in one step:
+final userService = context.resource(
+  'user-service',
+  circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
+  retry: RetryConfig(maxAttempts: 3),
+  timeout: const Duration(seconds: 5),
+);
+
+// Execute directly on the resource — no Operation needed!
+final user = await userService.execute(() => fetchUser());
+
+// Or pass a Resource directly to context.execute:
+final db = Resource('database', circuitBreaker: CircuitBreakerConfig());
+final queryResult = await context.execute(db, () => queryDatabase());
+
+// Fine-grained operations when specific endpoints need overrides:
+final readOp = userService.operation(
+  'readUser',
+  hedgingOverride: HedgingConfig(enabled: true, delay: Duration(milliseconds: 100)),
+);
+final result = await context.execute(readOp, () => fetchUser());
 ```
 
 ### Criticality-Aware Throttling
