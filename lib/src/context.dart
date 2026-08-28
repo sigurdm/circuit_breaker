@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:meta/meta.dart';
 import 'circuit_breaker.dart';
 import 'retry.dart';
 import 'hedging.dart';
@@ -58,7 +59,9 @@ final class ResourceConfig {
   /// A function that determines whether a given exception is considered a
   /// system failure (trips circuit breaker, counts as failure for throttling).
   ///
-  /// By default, all exceptions are considered failures.
+  /// By default, client programmer errors (such as [ArgumentError], [RangeError],
+  /// [FormatException], [TypeError], [AssertionError]) and [OperationCancelledException]
+  /// are ignored and not considered failures; all other exceptions are considered failures.
   final bool Function(Object) failureClassifier;
 
   /// Creates a new [ResourceConfig] with the specified policies.
@@ -107,7 +110,7 @@ final class Resource {
   /// - There is a cycle in the parent hierarchy.
   Resource(this.name, {ResourceConfig? config, this.parent})
     : config = config ?? ResourceConfig() {
-    if (name.isEmpty) {
+    if (name.trim().isEmpty) {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
     }
     var current = parent;
@@ -169,7 +172,7 @@ final class Operation {
     this.retryOverride,
     this.criticality = Criticality.critical,
   }) {
-    if (name.isEmpty) {
+    if (name.trim().isEmpty) {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
     }
   }
@@ -532,7 +535,7 @@ final class ThrottlingConfig {
 /// ```
 final class HedgingConfig {
   /// The static delay after which a speculative second request is sent.
-  /// Used if [dynamicPercentile] is null.
+  /// Used if [dynamicPercentile] is null. Defaults to 500ms.
   final Duration delay;
 
   /// Whether hedging is enabled for this resource.
@@ -572,7 +575,7 @@ final class HedgingConfig {
   /// - [dynamicPercentile] is non-null and not a finite number in (0.0, 1.0)
   /// - [delayMultiplier] is not positive or not finite
   /// - [adaptationRate] is not positive, not finite, or not > `1.0 - dynamicPercentile`
-  /// - [overloadPercentile] is not a finite number in `[0.0, 1.0]`
+  /// - [overloadPercentile] is not a finite number in `[0.0, 1.0)`
   /// - [maxOverloadTokens] is < 1.0 or not finite
   /// - [maxConcurrentHedges] is < 1
   HedgingConfig({
@@ -614,6 +617,13 @@ final class HedgingConfig {
         'must be a finite number in (0.0, 1.0)',
       );
     }
+    if (dynamicPercentile != null && (delay < minDelay || delay > maxDelay)) {
+      throw ArgumentError.value(
+        delay,
+        'delay',
+        'must be between minDelay ($minDelay) and maxDelay ($maxDelay) when dynamicPercentile is enabled',
+      );
+    }
     if (!delayMultiplier.isFinite || delayMultiplier <= 0.0) {
       throw ArgumentError.value(
         delayMultiplier,
@@ -633,11 +643,11 @@ final class HedgingConfig {
     }
     if (!overloadPercentile.isFinite ||
         overloadPercentile < 0.0 ||
-        overloadPercentile > 1.0) {
+        overloadPercentile >= 1.0) {
       throw ArgumentError.value(
         overloadPercentile,
         'overloadPercentile',
-        'must be a finite number in [0.0, 1.0]',
+        'must be a finite number in [0.0, 1.0)',
       );
     }
     if (!maxOverloadTokens.isFinite || maxOverloadTokens < 1.0) {
@@ -861,7 +871,8 @@ final class ResilienceContext {
   ///
   /// The [retryOn] parameter allows specifying an optional callback to determine
   /// whether a specific error should trigger a retry. If omitted, all exceptions
-  /// will trigger retries (up to max attempts).
+  /// will trigger retries (up to max attempts) except for [OperationCancelledException],
+  /// [CircuitBreakerOpenException], and [ResilienceTimeoutException].
   ///
   /// Throws [ThrottledException] if the request is rejected by adaptive throttling.
   /// Throws [CircuitBreakerOpenException] if the circuit breaker is open.
@@ -1049,23 +1060,42 @@ final class ResilienceContext {
         }
       }
 
-      final executionFuture = runZoned(
-        () => executeWithRetry(
-          hedgedAttempt,
-          config: execConfig,
-          state: state,
-          retryOn: (e) {
-            if (e is OperationCancelledException) return false;
-            if (e is CircuitBreakerOpenException) return false;
-            if (e is ResilienceTimeoutException) return false;
-            return retryOn?.call(e) ?? true;
-          },
-        ),
+      final executionCompleter = Completer<T>();
+      runZonedGuarded(
+        () async {
+          try {
+            final val = await executeWithRetry(
+              hedgedAttempt,
+              config: execConfig,
+              state: state,
+              retryOn: (e) {
+                if (e is OperationCancelledException) return false;
+                if (e is CircuitBreakerOpenException) return false;
+                if (e is ResilienceTimeoutException) return false;
+                return retryOn?.call(e) ?? true;
+              },
+            );
+            if (!executionCompleter.isCompleted) {
+              executionCompleter.complete(val);
+            }
+          } catch (e, st) {
+            if (!executionCompleter.isCompleted) {
+              executionCompleter.completeError(e, st);
+            }
+          }
+        },
+        (error, stack) {
+          // Isolate uncaught asynchronous errors in background tasks from escaping to root zone.
+          if (!executionCompleter.isCompleted) {
+            executionCompleter.completeError(error, stack);
+          }
+        },
         zoneValues: {
           #_cancellationToken: executionToken,
           #_deadline: effectiveDeadline,
         },
       );
+      final executionFuture = executionCompleter.future;
       executionFuture.ignore();
 
       if (effectiveDeadline != null) {
@@ -1204,10 +1234,14 @@ class ResourceState {
   ///
   /// If dynamic hedging is disabled, returns the static delay.
   Duration get dynamicDelayEstimate {
-    if (config.hedging.dynamicPercentile == null) {
-      return config.hedging.delay;
+    final h = config.hedging;
+    if (h.dynamicPercentile == null) {
+      return h.delay;
     }
-    return _dynamicDelayEstimate ?? config.hedging.delay;
+    final raw = _dynamicDelayEstimate ?? h.delay;
+    if (raw < h.minDelay) return h.minDelay;
+    if (raw > h.maxDelay) return h.maxDelay;
+    return raw;
   }
 
   /// Creates a [ResourceState] with the initial configuration.
@@ -1218,6 +1252,7 @@ class ResourceState {
   /// Refills the hedging token bucket based on a new logical request.
   ///
   /// **Internal use only.**
+  @internal
   void recordLogicalRequest() {
     final hedgingConfig = config.hedging;
     hedgingTokens = min(
@@ -1230,6 +1265,7 @@ class ResourceState {
   ///
   /// Returns true if the hedge is allowed to start, and consumes one token.
   /// **Internal use only.**
+  @internal
   bool tryStartHedge() {
     final hedgingConfig = config.hedging;
     if (activeHedges >= hedgingConfig.maxConcurrentHedges) {
@@ -1246,6 +1282,7 @@ class ResourceState {
   /// Records that a hedge has completed, decrementing the active count.
   ///
   /// **Internal use only.**
+  @internal
   void hedgeCompleted() {
     activeHedges = max(0, activeHedges - 1);
   }
@@ -1253,6 +1290,7 @@ class ResourceState {
   /// Records a hedging latency sample to update the dynamic delay estimate.
   ///
   /// **Internal use only.**
+  @internal
   void recordHedgingSample({required bool isSlow}) {
     final hedgingConfig = config.hedging;
     if (hedgingConfig.dynamicPercentile == null) return;
@@ -1278,6 +1316,7 @@ class ResourceState {
   /// Records a request outcome (accepted or not) for throttling.
   ///
   /// **Internal use only.**
+  @internal
   void recordRequest(bool accepted, Criticality criticality) {
     requestHistory[criticality]!.add(RequestRecord(DateTime.now(), accepted));
   }
@@ -1285,6 +1324,7 @@ class ResourceState {
   /// Cleans up history records that are older than the configured windows.
   ///
   /// **Internal use only.**
+  @internal
   void cleanHistory(DateTime now) {
     final cutoff = now.subtract(config.throttling.windowDuration);
     for (final history in requestHistory.values) {
@@ -1311,9 +1351,14 @@ class ResourceState {
 
   /// Returns the ratio of retries to total requests in the retry budget window.
   double getRetryBudgetRatio() {
-    final requests = getRetryBudgetRequests();
+    cleanHistory(DateTime.now());
+    final requests = retryHistory.length;
     if (requests == 0) return 0.0;
-    return getRetryBudgetRetries() / requests;
+    int retries = 0;
+    for (final r in retryHistory) {
+      if (r.isRetry) retries++;
+    }
+    return retries / requests;
   }
 
   /// Returns the number of request records for that criticality in the throttling window.
@@ -1331,9 +1376,15 @@ class ResourceState {
   /// Returns the calculated rejection probability for that criticality.
   double getThrottlingRejectionProbability(Criticality criticality) {
     cleanHistory(DateTime.now());
-    final requests = getThrottlingRequests(criticality);
+    final list = requestHistory[criticality];
+    final requests = list?.length ?? 0;
     if (requests < config.throttling.minRequests || requests == 0) return 0.0;
-    final accepts = getThrottlingAccepts(criticality);
+    int accepts = 0;
+    if (list != null) {
+      for (final r in list) {
+        if (r.accepted) accepts++;
+      }
+    }
     final kVal = config.throttling.getK(criticality);
     return max(0.0, (requests - kVal * accepts) / (requests + 1));
   }

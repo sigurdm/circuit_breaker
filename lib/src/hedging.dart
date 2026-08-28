@@ -51,24 +51,51 @@ Future<T> executeWithHedging<T>(
     if (!delayCompleter.isCompleted) delayCompleter.complete();
   });
 
+  final currentToken = ResilienceContext.currentCancellationToken;
+  if (currentToken != null) {
+    if (currentToken.isCancelled) {
+      if (!delayCompleter.isCompleted) delayCompleter.complete();
+    } else {
+      unawaited(
+        currentToken.onCancelled.then((_) {
+          if (!delayCompleter.isCompleted) delayCompleter.complete();
+        }),
+      );
+    }
+  }
+
   bool f1Done = false;
+  bool f1Succeeded = false;
   f1
       .then((_) {
         f1Done = true;
+        f1Succeeded = true;
         if (!delayCompleter.isCompleted) delayCompleter.complete();
       })
       .catchError((_) {
         f1Done = true;
+        f1Succeeded = false;
         if (!delayCompleter.isCompleted) delayCompleter.complete();
       });
 
-  await delayCompleter.future;
-  hedgingTimer.cancel();
+  try {
+    await delayCompleter.future;
+  } finally {
+    hedgingTimer.cancel();
+  }
+
+  if (currentToken != null && currentToken.isCancelled) {
+    earlyRegTimer?.cancel();
+    if (!c1.isCompleted) c1.complete();
+    return await f1;
+  }
 
   if (f1Done) {
     earlyRegTimer?.cancel();
-    final elapsed = stopwatch.elapsed;
-    registerSample(isSlow: elapsed > rawV);
+    if (f1Succeeded) {
+      final elapsed = stopwatch.elapsed;
+      registerSample(isSlow: elapsed > rawV);
+    }
     return await f1;
   }
 
@@ -79,9 +106,11 @@ Future<T> executeWithHedging<T>(
 
   bool startedHedge = false;
   Future<T>? f2;
+  Duration f2StartTime = Duration.zero;
   if (state.tryStartHedge()) {
     startedHedge = true;
     try {
+      f2StartTime = stopwatch.elapsed;
       f2 = operation(c2);
     } catch (e) {
       state.hedgeCompleted();
@@ -89,6 +118,7 @@ Future<T> executeWithHedging<T>(
         hedgingConfig.maxOverloadTokens,
         state.hedgingTokens + 1.0,
       );
+      earlyRegTimer?.cancel();
       rethrow;
     }
   }
@@ -96,7 +126,11 @@ Future<T> executeWithHedging<T>(
   if (!startedHedge) {
     // Blocked by token bucket or concurrency limit.
     // We still wait for the primary request to finish.
-    return await f1;
+    try {
+      return await f1;
+    } finally {
+      earlyRegTimer?.cancel();
+    }
   }
 
   final resultCompleter = Completer<T>();
@@ -141,7 +175,11 @@ Future<T> executeWithHedging<T>(
   }
 
   handleResult(f1, c2, isHedge: false, startTime: Duration.zero);
-  handleResult(f2!, c1, isHedge: true, startTime: actualHedgingDelay);
+  handleResult(f2!, c1, isHedge: true, startTime: f2StartTime);
 
-  return resultCompleter.future;
+  try {
+    return await resultCompleter.future;
+  } finally {
+    earlyRegTimer?.cancel();
+  }
 }

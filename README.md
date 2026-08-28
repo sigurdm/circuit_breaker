@@ -42,7 +42,7 @@ Avoids wasting resources on a dependency that is down. Using the electrical anal
 The circuit breaker transitions through three states:
 *   **Closed**: Normal operation. Requests are allowed to pass through to the backend.
 *   **Open**: The backend is failing. Requests are blocked and fail immediately with `CircuitBreakerOpenException`.
-*   **Half-Open**: The reset timeout has expired. The client allows a single trial request to test if the backend has recovered.
+*   **Half-Open**: The reset timeout has expired. The client admits trial requests (one at a time) to test if the backend has recovered, transitioning back to Closed once `halfOpenSuccessThreshold` consecutive successes are recorded (default: 3).
 
 ### Throttling vs. Circuit Breaking: Why Use Both?
 

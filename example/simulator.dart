@@ -458,7 +458,7 @@ Future<String> mockBackend(Completer<void> cancelSignal) async {
   await waitWithCancellation(actualLatency, cancelSignal);
 
   if (cancelSignal.isCompleted) {
-    throw Exception('Cancelled');
+    throw const OperationCancelledException();
   }
 
   if (Random().nextDouble() < state.effectiveFailureRate) {
@@ -1047,7 +1047,8 @@ void drawUI() {
 
     if (resState.circuitState == CircuitState.open) {
       final now = DateTime.now();
-      final elapsed = now.difference(resState.lastStateChange);
+      final failureTime = resState.lastFailureTime ?? resState.lastStateChange;
+      final elapsed = now.difference(failureTime);
       final remaining = resState.config.circuitBreaker.resetTimeout - elapsed;
       final remainingSecs = max(0.0, remaining.inMilliseconds / 1000.0);
       cbStateLine += ' (recovers in ${remainingSecs.toStringAsFixed(1)}s)';

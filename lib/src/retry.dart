@@ -97,25 +97,27 @@ Duration _calculateDelay(int attempt, RetryConfig config) {
   }
   // Exponential backoff: base * factor^(attempt - 1)
   // attempt starts at 1, so we use attempt - 1 for the exponent to start at base delay.
-  final safeExponent = min(attempt - 1, 62);
+  final safeExponent = max(0, min(attempt - 1, 62));
   final double exp = pow(config.backoffFactor, safeExponent).toDouble();
-  final double maxAttemptDelay = config.baseDelay.inMilliseconds * exp;
+  final double maxAttemptDelayUs =
+      config.baseDelay.inMicroseconds.toDouble() * exp;
 
-  final double cappedDelay = min(
-    config.maxDelay.inMilliseconds.toDouble(),
-    maxAttemptDelay,
+  final double cappedDelayUs = min(
+    config.maxDelay.inMicroseconds.toDouble(),
+    maxAttemptDelayUs,
   );
 
-  // Cap to 0x7FFFFFFF (max positive 32-bit int) to prevent Random.nextInt RangeError
-  final int safeCappedDelay = min(cappedDelay.toInt(), 0x7FFFFFFF);
-
   if (config.enableJitter) {
-    // Full Jitter: random between 0 and safeCappedDelay
-    final int jitterDelay = safeCappedDelay > 0
-        ? _random.nextInt(safeCappedDelay + 1)
+    // Cap to 0x7FFFFFFF ms to prevent Random.nextInt RangeError
+    final int safeCappedDelayMs = min(
+      (cappedDelayUs / 1000.0).round(),
+      0x7FFFFFFF,
+    );
+    final int jitterDelayMs = safeCappedDelayMs > 0
+        ? _random.nextInt(safeCappedDelayMs + 1)
         : 0;
-    return Duration(milliseconds: jitterDelay);
+    return Duration(milliseconds: jitterDelayMs);
   } else {
-    return Duration(milliseconds: safeCappedDelay);
+    return Duration(microseconds: cappedDelayUs.round());
   }
 }

@@ -8,8 +8,6 @@ import 'context.dart';
 ///
 /// This class calculates the probability of throttling a request based on the
 /// Google SRE adaptive throttling formula.
-///
-/// Implements Adaptive Throttling based on the Google SRE adaptive throttling algorithm.
 final class AdaptiveThrottler {
   final ResourceConfig config;
   final ResourceState state;
@@ -28,21 +26,10 @@ final class AdaptiveThrottler {
   /// Checks if the request should be throttled.
   /// Returns true if it should be throttled (rejected).
   bool shouldThrottle(Criticality criticality) {
-    final requests = state.getThrottlingRequests(criticality);
-    if (requests < config.throttling.minRequests) {
+    final p = rejectionProbability(criticality);
+    if (p <= 0.0) {
       return false;
     }
-    final accepts = state.getThrottlingAccepts(criticality);
-
-    final k = config.throttling.getK(criticality);
-
-    // Formula: P = max(0, (requests - K * accepts) / (requests + 1))
-    final p = max(0.0, (requests - k * accepts) / (requests + 1));
-
-    if (p == 0.0) {
-      return false;
-    }
-
     return _random.nextDouble() < p;
   }
 

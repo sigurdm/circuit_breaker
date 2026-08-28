@@ -28,7 +28,9 @@ final class CancellationToken {
     // because child.cancel() will call child.detach() which modifies _children.
     final childrenToCancel = List.of(_children);
     for (final child in childrenToCancel) {
-      child.cancel();
+      if (identical(child._parent, this)) {
+        child.cancel();
+      }
     }
     _children.clear();
 
@@ -39,8 +41,16 @@ final class CancellationToken {
   ///
   /// When [parent] is cancelled, this token will automatically be cancelled.
   void attach(CancellationToken parent) {
-    if (identical(this, parent)) {
-      throw ArgumentError('Cannot attach a CancellationToken to itself');
+    var ancestor = parent;
+    while (true) {
+      if (identical(ancestor, this)) {
+        throw ArgumentError(
+          'Cannot attach CancellationToken: creates a cycle in CancellationToken hierarchy',
+        );
+      }
+      final nextAncestor = ancestor._parent;
+      if (nextAncestor == null) break;
+      ancestor = nextAncestor;
     }
     if (_isCancelled) return;
     if (parent.isCancelled) {
