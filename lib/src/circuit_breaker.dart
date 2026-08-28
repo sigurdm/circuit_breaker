@@ -35,7 +35,16 @@ final class CircuitBreaker {
   ///
   /// Throws [CircuitBreakerOpenException] if the circuit is open.
   Future<T> execute<T>(Future<T> Function() action) async {
-    if (!isAllowed) {
+    final bool allowed;
+    if (state.circuitState == CircuitState.halfOpen &&
+        state.trialRequestInProgress) {
+      // Trial permit was already claimed (e.g. by a preceding cb.isAllowed check)
+      allowed = true;
+    } else {
+      allowed = isAllowed;
+    }
+
+    if (!allowed) {
       throw CircuitBreakerOpenException('Circuit breaker is open');
     }
     try {

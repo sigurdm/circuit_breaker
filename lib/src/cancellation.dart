@@ -40,6 +40,7 @@ final class CancellationToken {
   /// Attaches this token to a [parent] token.
   ///
   /// When [parent] is cancelled, this token will automatically be cancelled.
+  /// Throws [ArgumentError] if attaching [parent] creates a cycle in the token hierarchy.
   void attach(CancellationToken parent) {
     var ancestor = parent;
     while (true) {

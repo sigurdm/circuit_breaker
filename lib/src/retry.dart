@@ -108,15 +108,8 @@ Duration _calculateDelay(int attempt, RetryConfig config) {
   );
 
   if (config.enableJitter) {
-    // Cap to 0x7FFFFFFF ms to prevent Random.nextInt RangeError
-    final int safeCappedDelayMs = min(
-      (cappedDelayUs / 1000.0).round(),
-      0x7FFFFFFF,
-    );
-    final int jitterDelayMs = safeCappedDelayMs > 0
-        ? _random.nextInt(safeCappedDelayMs + 1)
-        : 0;
-    return Duration(milliseconds: jitterDelayMs);
+    final int jitterDelayUs = (_random.nextDouble() * cappedDelayUs).round();
+    return Duration(microseconds: jitterDelayUs);
   } else {
     return Duration(microseconds: cappedDelayUs.round());
   }

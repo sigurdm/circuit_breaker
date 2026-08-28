@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'context.dart';
+import 'exceptions.dart';
 
 /// Executes an operation with request hedging.
 /// The operation function receives a `Completer` that will be completed if the operation should be cancelled.
@@ -87,7 +88,7 @@ Future<T> executeWithHedging<T>(
   if (currentToken != null && currentToken.isCancelled) {
     earlyRegTimer?.cancel();
     if (!c1.isCompleted) c1.complete();
-    return await f1;
+    throw const OperationCancelledException();
   }
 
   if (f1Done) {
@@ -134,6 +135,18 @@ Future<T> executeWithHedging<T>(
   }
 
   final resultCompleter = Completer<T>();
+  if (currentToken != null) {
+    unawaited(
+      currentToken.onCancelled.then((_) {
+        earlyRegTimer?.cancel();
+        if (!c1.isCompleted) c1.complete();
+        if (!c2.isCompleted) c2.complete();
+        if (!resultCompleter.isCompleted) {
+          resultCompleter.completeError(const OperationCancelledException());
+        }
+      }),
+    );
+  }
   int failures = 0;
   Object? lastError;
   StackTrace? lastStackTrace;

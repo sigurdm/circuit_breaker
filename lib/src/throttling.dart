@@ -41,6 +41,28 @@ final class AdaptiveThrottler {
     state.recordRequest(accepted, criticality);
   }
 
+  /// Executes [action] protected by adaptive throttling.
+  ///
+  /// Throws [ThrottledException] if the request is throttled.
+  Future<T> execute<T>(
+    Future<T> Function() action, {
+    Criticality criticality = Criticality.critical,
+  }) async {
+    if (shouldThrottle(criticality)) {
+      throw const ThrottledException('Request was throttled');
+    }
+    try {
+      final result = await action();
+      recordRequest(true, criticality);
+      return result;
+    } catch (e) {
+      if (config.failureClassifier(e)) {
+        recordRequest(false, criticality);
+      }
+      rethrow;
+    }
+  }
+
   /// Returns the current rejection probability for [criticality].
   double rejectionProbability(Criticality criticality) {
     return state.getThrottlingRejectionProbability(criticality);

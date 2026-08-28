@@ -570,6 +570,7 @@ final class HedgingConfig {
   ///
   /// Throws [ArgumentError] if:
   /// - [delay] is negative
+  /// - [delay] is not between [minDelay] and [maxDelay] when [dynamicPercentile] is non-null
   /// - [minDelay] is not positive
   /// - [maxDelay] is less than [minDelay]
   /// - [dynamicPercentile] is non-null and not a finite number in (0.0, 1.0)
@@ -901,66 +902,69 @@ final class ResilienceContext {
     );
 
     final parentToken = ResilienceContext.currentCancellationToken;
+    if (parentToken != null && parentToken.isCancelled) {
+      throw const OperationCancelledException();
+    }
+
     final executionToken = CancellationToken();
     if (parentToken != null) {
       executionToken.attach(parentToken);
     }
 
-    final throttler = AdaptiveThrottler(execConfig, state);
-
-    // 1. Circuit Breaker Check (Fail-Fast Dry Run)
-    _checkCircuitBreakerChainFailFast(resource, executionToken);
-
-    // 2. Adaptive Throttling Check (Second)
-    final leafRes = _checkResource(
-      state,
-      execConfig.circuitBreaker,
-      executionToken,
-    );
-    final isHalfOpen =
-        state.circuitState == CircuitState.halfOpen ||
-        leafRes == _CheckResult.allowedStartTrial;
-
-    if (!isHalfOpen && throttler.shouldThrottle(operation.criticality)) {
-      throw ThrottledException('Request throttled for ${resource.name}');
-    }
-
-    // --- Deadline Setup ---
-    final parentDeadline = ResilienceContext.currentDeadline;
-    final DateTime? localDeadline = execConfig.timeout != null
-        ? DateTime.now().add(execConfig.timeout!)
-        : null;
-
-    final DateTime? effectiveDeadline = _mergeDeadlines(
-      parentDeadline,
-      localDeadline,
-    );
-
-    // Check if deadline is already exceeded
-    if (effectiveDeadline != null &&
-        DateTime.now().isAfter(effectiveDeadline)) {
-      throw ResilienceTimeoutException('Deadline exceeded before execution');
-    }
-
-    // 3. Commit Circuit Breaker Transitions
     final statesToRecord = <ResourceState>[];
-    _checkAndTransitionCircuitBreakerChain(
-      resource,
-      statesToRecord,
-      executionToken,
-    );
-    if (!statesToRecord.contains(state)) {
-      statesToRecord.add(state);
-    }
-
     Timer? timeoutTimer;
     bool recordedTimeoutFailure = false;
+
     try {
-      // Check if already cancelled
       if (executionToken.isCancelled) {
         throw const OperationCancelledException();
       }
-      // --------------------------------------
+
+      final throttler = AdaptiveThrottler(execConfig, state);
+
+      // 1. Circuit Breaker Check (Fail-Fast Dry Run)
+      _checkCircuitBreakerChainFailFast(resource, executionToken);
+
+      // 2. Adaptive Throttling Check (Second)
+      final leafRes = _checkResource(
+        state,
+        execConfig.circuitBreaker,
+        executionToken,
+      );
+      final isHalfOpen =
+          state.circuitState == CircuitState.halfOpen ||
+          leafRes == _CheckResult.allowedStartTrial;
+
+      if (!isHalfOpen && throttler.shouldThrottle(operation.criticality)) {
+        throw ThrottledException('Request throttled for ${resource.name}');
+      }
+
+      // --- Deadline Setup ---
+      final parentDeadline = ResilienceContext.currentDeadline;
+      final DateTime? localDeadline = execConfig.timeout != null
+          ? DateTime.now().add(execConfig.timeout!)
+          : null;
+
+      final DateTime? effectiveDeadline = _mergeDeadlines(
+        parentDeadline,
+        localDeadline,
+      );
+
+      // Check if deadline is already exceeded
+      if (effectiveDeadline != null &&
+          DateTime.now().isAfter(effectiveDeadline)) {
+        throw ResilienceTimeoutException('Deadline exceeded before execution');
+      }
+
+      // 3. Commit Circuit Breaker Transitions
+      _checkAndTransitionCircuitBreakerChain(
+        resource,
+        statesToRecord,
+        executionToken,
+      );
+      if (!statesToRecord.contains(state)) {
+        statesToRecord.add(state);
+      }
 
       final topLevelCancel = Completer<Exception>();
       unawaited(
@@ -1121,7 +1125,9 @@ final class ResilienceContext {
       ]);
       return result;
     } catch (e) {
-      if (e is ResilienceTimeoutException && !recordedTimeoutFailure) {
+      if (e is ResilienceTimeoutException &&
+          !recordedTimeoutFailure &&
+          execConfig.failureClassifier(e)) {
         for (final s in statesToRecord) {
           final cb = CircuitBreaker(s.config, s);
           cb.recordFailure();
