@@ -21,7 +21,7 @@ The repository includes an interactive terminal dashboard simulator that lets yo
 dart run example/simulator.dart
 ```
 
-For more details on the simulator controls and scenarios, see the [Simulator README](example/README.md).
+For more details on the simulator controls and scenarios, see the [Simulator README](https://github.com/sigurdm/circuit_breaker/blob/main/example/README.md).
 
 ## Core Concepts
 
