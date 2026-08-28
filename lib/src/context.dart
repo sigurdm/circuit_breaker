@@ -25,7 +25,17 @@ import 'cancellation.dart';
 ///   hedging: HedgingConfig(enabled: true, delay: Duration(milliseconds: 200)),
 /// );
 /// ```
-bool _defaultFailureClassifier(Object _) => true;
+bool _defaultFailureClassifier(Object e) {
+  if (e is OperationCancelledException) return false;
+  if (e is ArgumentError ||
+      e is RangeError ||
+      e is FormatException ||
+      e is TypeError ||
+      e is AssertionError) {
+    return false;
+  }
+  return true;
+}
 
 final class ResourceConfig {
   /// Configuration for the circuit breaker mechanism.
@@ -375,12 +385,18 @@ final class ThrottlingConfig {
   /// The duration of the rolling window used to calculate success rates.
   final Duration windowDuration;
 
+  /// The minimum number of requests before adaptive throttling is enforced.
+  /// Helps avoid throttling requests on startup or in low-traffic scenarios.
+  /// Defaults to 0.
+  final int minRequests;
+
   /// Creates a [ThrottlingConfig] with a base [k] and a [spread] factor.
   ///
   /// Preconditions:
   /// - [k] is the base multiplier. Must be >= 1.0. Defaults to 2.0.
   /// - [spread] must be non-negative (greater than or equal to 0.0). Defaults to 1.0.
   /// - [windowDuration] must be positive.
+  /// - [minRequests] must be non-negative. Defaults to 0.
   ///
   /// The effective K values for each criticality level are calculated as:
   /// - `criticalPlus`: `k * (1.0 + 3.0 * spread)`
@@ -393,6 +409,7 @@ final class ThrottlingConfig {
     double k = 2.0,
     double spread = 1.0,
     this.windowDuration = const Duration(minutes: 2),
+    this.minRequests = 0,
   }) : k = (
          criticalPlus: k * (1.0 + 3.0 * spread) < 1.1
              ? 1.1
@@ -418,6 +435,9 @@ final class ThrottlingConfig {
         'must be positive',
       );
     }
+    if (minRequests < 0) {
+      throw ArgumentError.value(minRequests, 'minRequests', 'must be >= 0');
+    }
   }
 
   /// Creates a [ThrottlingConfig] with explicit K values for each criticality.
@@ -426,6 +446,7 @@ final class ThrottlingConfig {
   ThrottlingConfig.withCriticality({
     required this.k,
     this.windowDuration = const Duration(minutes: 2),
+    this.minRequests = 0,
   }) {
     if (k.criticalPlus < 1.0) {
       throw ArgumentError.value(
@@ -453,6 +474,9 @@ final class ThrottlingConfig {
         'windowDuration',
         'must be positive',
       );
+    }
+    if (minRequests < 0) {
+      throw ArgumentError.value(minRequests, 'minRequests', 'must be >= 0');
     }
   }
 
@@ -914,8 +938,7 @@ final class ResilienceContext {
         }),
       );
 
-      // Wrap action to record attempt outcomes
-      Future<T> instrumentedAction(Completer<void> cancel) async {
+      Future<T> singleAttempt(Completer<void> cancel) async {
         final combinedCancel = Completer<void>();
 
         void onCancel() {
@@ -931,77 +954,80 @@ final class ResilienceContext {
         attemptToken.attach(executionToken);
         unawaited(cancel.future.then((_) => attemptToken.cancel()));
 
-        final attemptStatesToRecord = <ResourceState>[];
         try {
-          _checkAndTransitionCircuitBreakerChain(
-            resource,
-            attemptStatesToRecord,
-            executionToken,
+          return await runZoned(
+            () async {
+              if (attemptToken.isCancelled) {
+                throw const OperationCancelledException();
+              }
+              if (effectiveDeadline != null &&
+                  DateTime.now().isAfter(effectiveDeadline)) {
+                throw ResilienceTimeoutException(
+                  'Deadline exceeded during execution',
+                );
+              }
+              return await action(combinedCancel);
+            },
+            zoneValues: {
+              #_cancellationToken: attemptToken,
+              #_deadline: effectiveDeadline,
+            },
           );
-          if (!attemptStatesToRecord.contains(state)) {
-            attemptStatesToRecord.add(state);
+        } finally {
+          attemptToken.detach();
+        }
+      }
+
+      Future<T> hedgedAttempt() async {
+        final attemptStatesToRecord = <ResourceState>[];
+        _checkAndTransitionCircuitBreakerChain(
+          resource,
+          attemptStatesToRecord,
+          executionToken,
+        );
+        if (!attemptStatesToRecord.contains(state)) {
+          attemptStatesToRecord.add(state);
+        }
+
+        try {
+          final result = await executeWithHedging(
+            singleAttempt,
+            config: execConfig,
+            state: state,
+          );
+
+          if (!topLevelCancel.isCompleted) {
+            for (final s in attemptStatesToRecord) {
+              final cb = CircuitBreaker(s.config, s);
+              cb.recordSuccess();
+            }
+            state.recordRequest(true, operation.criticality);
           }
-
-          try {
-            final result = await runZoned(
-              () async {
-                if (attemptToken.isCancelled) {
-                  throw const OperationCancelledException();
-                }
-                if (effectiveDeadline != null &&
-                    DateTime.now().isAfter(effectiveDeadline)) {
-                  throw ResilienceTimeoutException(
-                    'Deadline exceeded during execution',
-                  );
-                }
-                return await action(combinedCancel);
-              },
-              zoneValues: {
-                #_cancellationToken: attemptToken,
-                #_deadline: effectiveDeadline,
-              },
-            );
-
-            if (!combinedCancel.isCompleted) {
+          return result;
+        } catch (e) {
+          if (!topLevelCancel.isCompleted &&
+              e is! OperationCancelledException) {
+            if (execConfig.failureClassifier(e)) {
+              for (final s in attemptStatesToRecord) {
+                final cb = CircuitBreaker(s.config, s);
+                cb.recordFailure();
+              }
+              state.recordRequest(false, operation.criticality);
+            } else {
               for (final s in attemptStatesToRecord) {
                 final cb = CircuitBreaker(s.config, s);
                 cb.recordSuccess();
               }
               state.recordRequest(true, operation.criticality);
             }
-            return result;
-          } catch (e) {
-            if (!combinedCancel.isCompleted) {
-              if (execConfig.failureClassifier(e)) {
-                for (final s in attemptStatesToRecord) {
-                  final cb = CircuitBreaker(s.config, s);
-                  cb.recordFailure();
-                }
-                state.recordRequest(false, operation.criticality);
-              } else {
-                for (final s in attemptStatesToRecord) {
-                  final cb = CircuitBreaker(s.config, s);
-                  cb.recordSuccess();
-                }
-                state.recordRequest(true, operation.criticality);
-              }
-              rethrow;
-            } else {
-              throw const OperationCancelledException();
-            }
           }
-        } finally {
-          attemptToken.detach();
+          rethrow;
         }
       }
 
       final executionFuture = runZoned(
         () => executeWithRetry(
-          () => executeWithHedging(
-            instrumentedAction,
-            config: execConfig,
-            state: state,
-          ),
+          hedgedAttempt,
           config: execConfig,
           state: state,
           retryOn: (e) {
@@ -1051,6 +1077,11 @@ final class ResilienceContext {
     } finally {
       timeoutTimer?.cancel();
       executionToken.detach();
+      for (final s in statesToRecord) {
+        if (s.activeTrialToken == executionToken) {
+          s.activeTrialToken = null;
+        }
+      }
     }
   }
 }

@@ -10,7 +10,7 @@ Future<T> executeWithHedging<T>(
 }) async {
   final hedgingConfig = config.hedging;
 
-  if (!hedgingConfig.enabled) {
+  if (!hedgingConfig.enabled || state.circuitState == CircuitState.halfOpen) {
     return await operation(Completer<void>());
   }
 
@@ -78,7 +78,12 @@ Future<T> executeWithHedging<T>(
   Future<T>? f2;
   if (state.tryStartHedge()) {
     startedHedge = true;
-    f2 = operation(c2);
+    try {
+      f2 = operation(c2);
+    } catch (e) {
+      state.hedgeCompleted();
+      rethrow;
+    }
   }
 
   if (!startedHedge) {

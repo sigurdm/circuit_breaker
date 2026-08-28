@@ -36,7 +36,8 @@ export 'src/context.dart'
 
 export 'src/cancellation.dart' show CancellationToken;
 
-export 'src/throttling.dart' show ThrottledException;
+export 'src/circuit_breaker.dart' show CircuitBreaker;
+export 'src/throttling.dart' show AdaptiveThrottler, ThrottledException;
 export 'src/exceptions.dart'
     show
         CircuitBreakerOpenException,

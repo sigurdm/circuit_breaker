@@ -22,6 +22,7 @@ Future<T> executeWithRetry<T>(
       state.retryHistory.add(
         RetryAttemptRecord(DateTime.now(), isRetry: attempts > 1),
       );
+      state.cleanHistory(DateTime.now());
       return await operation();
     } catch (e) {
       if (attempts >= retryConfig.maxAttempts) {
@@ -83,9 +84,13 @@ Future<T> executeWithRetry<T>(
 }
 
 Duration _calculateDelay(int attempt, RetryConfig config) {
-  // Exponential backoff: base * 2^attempt
+  if (config.baseDelay == Duration.zero) {
+    return Duration.zero;
+  }
+  // Exponential backoff: base * factor^(attempt - 1)
   // attempt starts at 1, so we use attempt - 1 for the exponent to start at base delay.
-  final double exp = pow(config.backoffFactor, attempt - 1).toDouble();
+  final safeExponent = min(attempt - 1, 62);
+  final double exp = pow(config.backoffFactor, safeExponent).toDouble();
   final double maxAttemptDelay = config.baseDelay.inMilliseconds * exp;
 
   final double cappedDelay = min(
@@ -93,11 +98,16 @@ Duration _calculateDelay(int attempt, RetryConfig config) {
     maxAttemptDelay,
   );
 
+  // Cap to 0x7FFFFFFF (max positive 32-bit int) to prevent Random.nextInt RangeError
+  final int safeCappedDelay = min(cappedDelay.toInt(), 0x7FFFFFFF);
+
   if (config.enableJitter) {
-    // Full Jitter: random between 0 and cappedDelay
-    final int jitterDelay = _random.nextInt(cappedDelay.toInt() + 1);
+    // Full Jitter: random between 0 and safeCappedDelay
+    final int jitterDelay = safeCappedDelay > 0
+        ? _random.nextInt(safeCappedDelay + 1)
+        : 0;
     return Duration(milliseconds: jitterDelay);
   } else {
-    return Duration(milliseconds: cappedDelay.toInt());
+    return Duration(milliseconds: safeCappedDelay);
   }
 }

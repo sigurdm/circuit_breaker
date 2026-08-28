@@ -4,3 +4,4 @@ coverage/
 coverage.lcov
 .pub-cache/
 *.log
+.jetski/

@@ -22,6 +22,9 @@ final class AdaptiveThrottler {
   /// Returns true if it should be throttled (rejected).
   bool shouldThrottle(Criticality criticality) {
     final requests = state.getThrottlingRequests(criticality);
+    if (requests < config.throttling.minRequests) {
+      return false;
+    }
     final accepts = state.getThrottlingAccepts(criticality);
 
     final k = config.throttling.getK(criticality);
@@ -49,7 +52,7 @@ final class ThrottledException implements Exception {
   final String message;
 
   /// Creates a [ThrottledException].
-  ThrottledException(this.message);
+  const ThrottledException(this.message);
 
   @override
   String toString() => 'ThrottledException: $message';

@@ -113,7 +113,7 @@ void main() async {
   // Define a resource with shared state
   final myService = Resource(
     'my-service',
-    config: const ResourceConfig(
+    config: ResourceConfig(
       circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
       throttling: ThrottlingConfig(k: 2.0),
       timeout: Duration(seconds: 5),
@@ -124,7 +124,7 @@ void main() async {
   final readOp = Operation(
     'read',
     myService,
-    hedgingOverride: const HedgingConfig(
+    hedgingOverride: HedgingConfig(
       enabled: true,
       delay: Duration(milliseconds: 200),
     ),
@@ -355,9 +355,9 @@ The library automatically coordinates and enforces these patterns in the followi
 
 ```
 Client Request
-└── [Overall Timeout]
-    └── [Circuit Breaker Check]
-        └── [Adaptive Throttling] (bypassed if CB is Half-Open)
+└── [Circuit Breaker Check (Fail-Fast)]
+    └── [Adaptive Throttling] (bypassed if CB is Half-Open)
+        └── [Overall Timeout (Deadline)]
             └── [Retry Loop]
                 └── [Hedging Loop]
                     └── [Per-Attempt Timeout (Client HTTP)]

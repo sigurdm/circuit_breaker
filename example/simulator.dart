@@ -538,6 +538,9 @@ void executeRequest(Resource resource, Criticality criticality) async {
       latency: stopwatch.elapsed,
     );
     logEvent('[Timeout] Request timed out');
+  } on OperationCancelledException {
+    stopwatch.stop();
+    // Cancellations are intentionally not counted as backend failures.
   } catch (e) {
     stopwatch.stop();
     statsTracker.record(

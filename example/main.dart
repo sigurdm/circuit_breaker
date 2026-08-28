@@ -43,6 +43,7 @@ void main() async {
       circuitBreaker: CircuitBreakerConfig(
         consecutiveFailuresThreshold: 3,
         resetTimeout: Duration(seconds: 2),
+        halfOpenSuccessThreshold: 1,
       ),
       // 2. Adaptive Throttling: Aggressive K=1.5 to show throttling quickly
       throttling: ThrottlingConfig(
