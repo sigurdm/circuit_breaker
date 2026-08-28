@@ -29,19 +29,19 @@ Future<T> executeWithRetry<T>(
         rethrow;
       }
 
+      // Check if we should retry on this specific error first
+      if (retryOn != null && !retryOn(e)) {
+        rethrow;
+      }
+
       // Check retry budget.
       final totalRequests = state.getRetryBudgetRequests();
       final totalRetries = state.getRetryBudgetRetries();
 
-      if (totalRequests > retryConfig.minRequestsForBudget &&
+      if (totalRequests >= retryConfig.minRequestsForBudget &&
           (totalRetries + 1) >
               (totalRequests + 1) * retryConfig.retryBudgetRatio) {
         rethrow; // Budget exceeded
-      }
-
-      // Check if we should retry on this specific error
-      if (retryOn != null && !retryOn(e)) {
-        rethrow;
       }
 
       // Check if deadline is already exceeded
@@ -95,6 +95,7 @@ Duration _calculateDelay(int attempt, RetryConfig config) {
   if (config.baseDelay == Duration.zero) {
     return Duration.zero;
   }
+  final maxDelayUs = config.maxDelay.inMicroseconds;
   // Exponential backoff: base * factor^(attempt - 1)
   // attempt starts at 1, so we use attempt - 1 for the exponent to start at base delay.
   final safeExponent = max(0, min(attempt - 1, 62));
@@ -102,15 +103,22 @@ Duration _calculateDelay(int attempt, RetryConfig config) {
   final double maxAttemptDelayUs =
       config.baseDelay.inMicroseconds.toDouble() * exp;
 
-  final double cappedDelayUs = min(
-    config.maxDelay.inMicroseconds.toDouble(),
-    maxAttemptDelayUs,
-  );
+  if (!maxAttemptDelayUs.isFinite ||
+      maxAttemptDelayUs >= maxDelayUs.toDouble()) {
+    if (config.enableJitter) {
+      final int jitterDelayUs = (_random.nextDouble() * maxDelayUs).round();
+      return Duration(microseconds: jitterDelayUs);
+    } else {
+      return config.maxDelay;
+    }
+  }
+
+  final int cappedDelayUs = min(maxDelayUs, maxAttemptDelayUs.round());
 
   if (config.enableJitter) {
     final int jitterDelayUs = (_random.nextDouble() * cappedDelayUs).round();
     return Duration(microseconds: jitterDelayUs);
   } else {
-    return Duration(microseconds: cappedDelayUs.round());
+    return Duration(microseconds: cappedDelayUs);
   }
 }

@@ -811,6 +811,7 @@ final class ResilienceContext {
   ) {
     Resource? current = resource;
     final statesToTransition = <ResourceState>[];
+    final pendingStatesToRecord = <ResourceState>[];
     bool allowed = true;
     String? blockedReason;
 
@@ -828,9 +829,9 @@ final class ResilienceContext {
       }
       if (res == _CheckResult.allowedStartTrial) {
         statesToTransition.add(s);
-        statesToRecord.add(s);
+        pendingStatesToRecord.add(s);
       } else if (res == _CheckResult.allowedContinueTrial) {
-        statesToRecord.add(s);
+        pendingStatesToRecord.add(s);
       }
       current = current.parent;
     }
@@ -843,8 +844,11 @@ final class ResilienceContext {
     for (final s in statesToTransition) {
       s.circuitState = CircuitState.halfOpen;
     }
-    for (final s in statesToRecord) {
+    for (final s in pendingStatesToRecord) {
       s.activeTrialToken = token;
+      if (!statesToRecord.contains(s)) {
+        statesToRecord.add(s);
+      }
     }
   }
 
@@ -1192,6 +1196,10 @@ class ResourceState {
       _activeTrialToken = null;
     }
   }
+
+  /// Whether an active trial action is currently executing in Half-Open state.
+  @internal
+  bool isExecutingTrial = false;
 
   CircuitState _circuitState = CircuitState.closed;
 

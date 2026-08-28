@@ -36,10 +36,16 @@ final class CircuitBreaker {
   /// Throws [CircuitBreakerOpenException] if the circuit is open.
   Future<T> execute<T>(Future<T> Function() action) async {
     final bool allowed;
-    if (state.circuitState == CircuitState.halfOpen &&
-        state.trialRequestInProgress) {
-      // Trial permit was already claimed (e.g. by a preceding cb.isAllowed check)
-      allowed = true;
+    if (state.circuitState == CircuitState.halfOpen) {
+      if (state.isExecutingTrial) {
+        // Another trial is actively executing: block concurrent requests!
+        allowed = false;
+      } else if (state.trialRequestInProgress) {
+        // Trial permit was already claimed (e.g. by a preceding cb.isAllowed check)
+        allowed = true;
+      } else {
+        allowed = isAllowed;
+      }
     } else {
       allowed = isAllowed;
     }
@@ -47,6 +53,11 @@ final class CircuitBreaker {
     if (!allowed) {
       throw CircuitBreakerOpenException('Circuit breaker is open');
     }
+
+    if (state.circuitState == CircuitState.halfOpen) {
+      state.isExecutingTrial = true;
+    }
+
     try {
       final result = await action();
       recordSuccess();
@@ -58,6 +69,8 @@ final class CircuitBreaker {
         state.trialRequestInProgress = false;
       }
       rethrow;
+    } finally {
+      state.isExecutingTrial = false;
     }
   }
 

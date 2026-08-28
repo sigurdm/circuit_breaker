@@ -120,6 +120,8 @@ Future<T> executeWithHedging<T>(
         state.hedgingTokens + 1.0,
       );
       earlyRegTimer?.cancel();
+      if (!c1.isCompleted) c1.complete();
+      if (!c2.isCompleted) c2.complete();
       rethrow;
     }
   }
@@ -162,8 +164,16 @@ Future<T> executeWithHedging<T>(
           if (!resultCompleter.isCompleted) {
             earlyRegTimer?.cancel();
             final elapsed = stopwatch.elapsed;
-            final latency = elapsed - startTime;
-            registerSample(isSlow: latency > rawV);
+
+            if (!isHedge) {
+              registerSample(isSlow: elapsed > rawV);
+            } else {
+              // Hedged request won. If total elapsed time >= rawV, f1 definitely exceeded rawV.
+              // If total elapsed time < rawV, f1 was right-censored; do not record false sample.
+              if (elapsed >= rawV) {
+                registerSample(isSlow: true);
+              }
+            }
 
             if (!otherCancel.isCompleted) {
               otherCancel.complete();
