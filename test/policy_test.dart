@@ -438,12 +438,12 @@ void main() {
   test('supports adaptive throttling rejection', () async {
     final policy = ResiliencePolicy(
       throttling: ThrottlingConfig(k: 1.1, minRequests: 2),
-      circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 10),
+      circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 50),
       retry: RetryConfig(maxAttempts: 1),
     );
 
-    // Record 5 failures to drive up rejection probability
-    for (int i = 0; i < 5; i++) {
+    // Record failures to drive up rejection probability
+    for (int i = 0; i < 15; i++) {
       try {
         await policy.execute(() async => throw StateError('backend down'));
       } catch (_) {}
@@ -451,7 +451,7 @@ void main() {
 
     // Should now throw ThrottledException for some requests
     var throttledCount = 0;
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 50; i++) {
       try {
         await policy.execute(() async => 'success');
       } on ThrottledException {
