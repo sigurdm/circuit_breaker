@@ -66,17 +66,13 @@ Future<T> executeWithHedging<T>(
   });
 
   if (currentToken != null) {
-    if (currentToken.isCancelled) {
-      if (!delayCompleter.isCompleted) delayCompleter.complete();
-    } else {
-      unawaited(
-        currentToken.onCancelled
-            .then((_) {
-              if (!delayCompleter.isCompleted) delayCompleter.complete();
-            })
-            .catchError((_, __) {}),
-      );
-    }
+    unawaited(
+      currentToken.onCancelled
+          .then((_) {
+            if (!delayCompleter.isCompleted) delayCompleter.complete();
+          })
+          .catchError((_, __) {}),
+    );
   }
 
   bool f1Done = false;

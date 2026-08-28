@@ -1058,7 +1058,7 @@ final class ResilienceContext {
 
   void _checkAndTransitionCircuitBreakerChain(
     Resource resource,
-    List<ResourceState> statesToRecord,
+    Set<ResourceState> statesToRecord,
     CancellationToken token,
   ) {
     Resource? current = resource;
@@ -1098,9 +1098,7 @@ final class ResilienceContext {
     }
     for (final s in pendingStatesToRecord) {
       s.activeTrialToken = token;
-      if (!statesToRecord.contains(s)) {
-        statesToRecord.add(s);
-      }
+      statesToRecord.add(s);
     }
   }
 
@@ -1216,7 +1214,7 @@ final class ResilienceContext {
       executionToken.attach(parentToken);
     }
 
-    final statesToRecord = <ResourceState>[];
+    final statesToRecord = <ResourceState>{};
     Timer? timeoutTimer;
     bool recordedTimeoutFailure = false;
 
@@ -1267,9 +1265,7 @@ final class ResilienceContext {
         statesToRecord,
         executionToken,
       );
-      if (!statesToRecord.contains(state)) {
-        statesToRecord.add(state);
-      }
+      statesToRecord.add(state);
 
       final topLevelCancel = Completer<Exception>();
       unawaited(
@@ -1323,20 +1319,14 @@ final class ResilienceContext {
       }
 
       Future<T> hedgedAttempt() async {
-        final attemptStatesToRecord = <ResourceState>[];
+        final attemptStatesToRecord = <ResourceState>{};
         _checkAndTransitionCircuitBreakerChain(
           resource,
           attemptStatesToRecord,
           executionToken,
         );
-        if (!attemptStatesToRecord.contains(state)) {
-          attemptStatesToRecord.add(state);
-        }
-        for (final s in attemptStatesToRecord) {
-          if (!statesToRecord.contains(s)) {
-            statesToRecord.add(s);
-          }
-        }
+        attemptStatesToRecord.add(state);
+        statesToRecord.addAll(attemptStatesToRecord);
 
         try {
           final result = await executeWithHedging(
