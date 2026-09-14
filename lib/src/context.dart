@@ -27,7 +27,14 @@ import 'cancellation.dart';
 ///   hedging: HedgingConfig(enabled: true, delay: Duration(milliseconds: 200)),
 /// );
 /// ```
-bool _defaultFailureClassifier(Object e) {
+/// The default failure classifier used to determine whether an error represents
+/// a service failure (as opposed to client programmer errors or control flow exceptions).
+///
+/// Programmer errors ([ArgumentError], [RangeError], [FormatException], [TypeError],
+/// [AssertionError]) and control flow exceptions ([OperationCancelledException],
+/// [CircuitBreakerOpenException], [ThrottledException]) return `false`. All other
+/// exceptions return `true`.
+bool defaultFailureClassifier(Object e) {
   if (e is OperationCancelledException ||
       e is CircuitBreakerOpenException ||
       e is ThrottledException) {
@@ -42,6 +49,8 @@ bool _defaultFailureClassifier(Object e) {
   }
   return true;
 }
+
+bool _defaultFailureClassifier(Object e) => defaultFailureClassifier(e);
 
 /// Safely evaluates [classifier] on [e], falling back to [_defaultFailureClassifier]
 /// if [classifier] throws.
@@ -1206,9 +1215,11 @@ final class ResilienceContext {
   /// that the operation should be aborted if possible.
   ///
   /// The [retryOn] parameter allows specifying an optional callback to determine
-  /// whether a specific error should trigger a retry. If omitted, all exceptions
-  /// will trigger retries (up to max attempts) except for [OperationCancelledException],
-  /// [CircuitBreakerOpenException], and [ResilienceTimeoutException].
+  /// whether a specific error should trigger a retry. If omitted, the target's
+  /// failure classifier is used; programmer errors ([ArgumentError], [RangeError],
+  /// [FormatException], [TypeError], [AssertionError]) and control flow exceptions
+  /// ([OperationCancelledException], [CircuitBreakerOpenException], and
+  /// [ResilienceTimeoutException]) are not retried.
   ///
   /// Throws [ThrottledException] if the request is rejected by adaptive throttling.
   /// Throws [CircuitBreakerOpenException] if the circuit breaker is open.
@@ -1405,7 +1416,10 @@ final class ResilienceContext {
                 if (e is OperationCancelledException) return false;
                 if (e is CircuitBreakerOpenException) return false;
                 if (e is ResilienceTimeoutException) return false;
-                return retryOn?.call(e) ?? true;
+                if (retryOn != null) {
+                  return retryOn(e);
+                }
+                return safeClassify(execConfig.failureClassifier, e);
               },
             );
             if (!executionCompleter.isCompleted) {
@@ -1418,10 +1432,8 @@ final class ResilienceContext {
           }
         },
         (error, stack) {
-          // Isolate uncaught asynchronous errors in background tasks from escaping to root zone.
-          if (!executionCompleter.isCompleted) {
-            executionCompleter.completeError(error, stack);
-          }
+          // Isolate uncaught asynchronous errors in background tasks from escaping to root zone,
+          // preventing unrelated background errors from hijacking the primary execution.
         },
         zoneValues: {
           ResilienceContext.cancellationTokenZoneKey: executionToken,

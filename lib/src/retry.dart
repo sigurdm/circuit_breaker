@@ -48,7 +48,11 @@ Future<T> executeWithRetry<T>(
       }
 
       // Check if we should retry on this specific error first
-      if (retryOn != null && !retryOn(e)) {
+      if (retryOn != null) {
+        if (!retryOn(e)) {
+          rethrow;
+        }
+      } else if (!safeClassify(config.failureClassifier, e)) {
         rethrow;
       }
 
@@ -186,7 +190,8 @@ final class Retry {
       timeout: timeout,
       failureClassifier: failureClassifier,
     );
-    final effectiveRetryOn = retryOn ?? failureClassifier;
+    final effectiveRetryOn =
+        retryOn ?? failureClassifier ?? cfg.failureClassifier;
     return Retry(cfg, state ?? ResourceState(cfg), retryOn: effectiveRetryOn);
   }
 
@@ -258,7 +263,7 @@ final class Retry {
             action,
             config: config,
             state: state,
-            retryOn: retryOn ?? this.retryOn,
+            retryOn: retryOn ?? this.retryOn ?? config.failureClassifier,
           );
           if (!executionCompleter.isCompleted) {
             executionCompleter.complete(val);

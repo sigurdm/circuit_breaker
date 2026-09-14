@@ -50,9 +50,9 @@ void main() {
       await expectLater(
         r.execute(() async {
           attempts++;
-          throw FormatException('fatal');
+          throw Exception('fatal');
         }),
-        throwsFormatException,
+        throwsException,
       );
 
       expect(attempts, equals(2));

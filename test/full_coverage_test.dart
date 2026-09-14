@@ -314,16 +314,15 @@ void main() {
           ),
         );
 
-        // 5. unhandled async error in runZonedGuarded
-        await expectLater(
-          hedger.executeCancelable((c) {
-            Timer.run(
-              () => throw StateError('unhandled async error in hedger zone'),
-            );
-            return Completer<String>().future;
-          }),
-          throwsA(isA<StateError>()),
-        );
+        // 5. unhandled async error in runZonedGuarded is isolated and does not hijack execution
+        final hedgerResult = await hedger.executeCancelable((c) async {
+          Timer.run(
+            () => throw StateError('unhandled async error in hedger zone'),
+          );
+          await Future.delayed(const Duration(milliseconds: 10));
+          return 'done';
+        });
+        expect(hedgerResult, equals('done'));
       },
     );
   });
