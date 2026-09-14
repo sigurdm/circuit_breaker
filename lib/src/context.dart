@@ -1028,10 +1028,15 @@ final class ResilienceContext {
       return _CheckResult.blockedOpen;
     }
     if (state.circuitState == CircuitState.halfOpen) {
-      if (!state.trialRequestInProgress || state.activeTrialToken == token) {
-        return _CheckResult.allowedContinueTrial;
+      if (state.activeTrialToken != null && state.activeTrialToken != token) {
+        if (state.isTrialExpired(config.resetTimeout)) {
+          state.activeTrialToken?.cancel();
+          state.activeTrialToken = null;
+          return _CheckResult.allowedStartTrial;
+        }
+        return _CheckResult.blockedTrialInProgress;
       }
-      return _CheckResult.blockedTrialInProgress;
+      return _CheckResult.allowedContinueTrial;
     }
     return _CheckResult.blockedOpen;
   }
@@ -1473,21 +1478,54 @@ class ResourceState {
   /// The number of consecutive successes in Half-Open state.
   int halfOpenSuccessCount = 0;
 
+  /// The timestamp when the active trial request began.
+  DateTime? trialStartTime;
+
   CancellationToken? _activeTrialToken;
 
   /// The cancellation token of the active trial request, if any.
   CancellationToken? get activeTrialToken => _activeTrialToken;
+
   set activeTrialToken(CancellationToken? token) {
     _activeTrialToken = token;
+    if (token != null) {
+      trialStartTime = DateTime.now();
+    } else {
+      trialStartTime = null;
+      isExecutingTrial = false;
+    }
+  }
+
+  /// Checks if the active trial request has expired according to [timeout] or
+  /// the resource's [CircuitBreakerConfig.resetTimeout].
+  bool isTrialExpired([Duration? timeout]) {
+    final start = trialStartTime;
+    if (start == null) return false;
+    final t = timeout ?? _config.circuitBreaker.resetTimeout;
+    final now = DateTime.now();
+    if (now.isBefore(start)) {
+      trialStartTime = now;
+      return false;
+    }
+    return now.difference(start) > t;
   }
 
   /// Whether a trial request is currently in progress in Half-Open state.
-  bool get trialRequestInProgress => _activeTrialToken != null;
+  bool get trialRequestInProgress {
+    if (_activeTrialToken != null && isTrialExpired()) {
+      return false;
+    }
+    return _activeTrialToken != null;
+  }
+
   set trialRequestInProgress(bool value) {
     if (value) {
       _activeTrialToken ??= CancellationToken();
+      trialStartTime ??= DateTime.now();
     } else {
       _activeTrialToken = null;
+      trialStartTime = null;
+      isExecutingTrial = false;
     }
   }
 

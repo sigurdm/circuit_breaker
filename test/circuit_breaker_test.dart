@@ -52,18 +52,19 @@ void main() {
         cb.recordFailure();
         await Future.delayed(const Duration(milliseconds: 150));
 
+        expect(cb.isAllowed, isTrue);
         expect(
-          cb.isAllowed,
+          cb.tryAcquireTrial(),
           isTrue,
         ); // Transitions to half-open, trial 1 starts
         cb.recordSuccess();
         expect(state.circuitState, CircuitState.halfOpen); // Still half-open
 
-        expect(cb.isAllowed, isTrue); // Trial 2 starts
+        expect(cb.tryAcquireTrial(), isTrue); // Trial 2 starts
         cb.recordSuccess();
         expect(state.circuitState, CircuitState.halfOpen); // Still half-open
 
-        expect(cb.isAllowed, isTrue); // Trial 3 starts
+        expect(cb.tryAcquireTrial(), isTrue); // Trial 3 starts
         cb.recordSuccess();
         expect(
           state.circuitState,
@@ -78,7 +79,8 @@ void main() {
       cb.recordFailure();
       await Future.delayed(const Duration(milliseconds: 150));
 
-      expect(cb.isAllowed, isTrue); // Transitions to half-open
+      expect(cb.isAllowed, isTrue);
+      expect(cb.tryAcquireTrial(), isTrue); // Transitions to half-open
 
       cb.recordFailure();
       expect(state.circuitState, CircuitState.open);
@@ -89,8 +91,13 @@ void main() {
       cb.recordFailure();
       await Future.delayed(const Duration(milliseconds: 150));
 
-      expect(cb.isAllowed, isTrue); // First allowed (transitions to half-open)
-      expect(cb.isAllowed, isFalse); // Second rejected
+      expect(cb.isAllowed, isTrue);
+      expect(cb.tryAcquireTrial(), isTrue); // First trial acquired
+      expect(cb.tryAcquireTrial(), isFalse); // Second trial rejected
+      expect(
+        cb.isAllowed,
+        isFalse,
+      ); // Request not allowed while trial in progress
     });
 
     test(
@@ -113,25 +120,30 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 150));
 
         expect(customCb.isAllowed, isTrue);
+        expect(customCb.tryAcquireTrial(), isTrue);
         expect(customState.circuitState, CircuitState.halfOpen);
         expect(customState.trialRequestInProgress, isTrue);
+        expect(customCb.tryAcquireTrial(), isFalse);
         expect(customCb.isAllowed, isFalse);
 
         customCb.recordSuccess();
         expect(customState.circuitState, CircuitState.halfOpen);
         expect(customState.trialRequestInProgress, isFalse);
+        expect(customCb.isAllowed, isTrue);
         expect(customState.halfOpenSuccessCount, 1);
 
-        expect(customCb.isAllowed, isTrue);
+        expect(customCb.tryAcquireTrial(), isTrue);
         expect(customState.trialRequestInProgress, isTrue);
+        expect(customCb.tryAcquireTrial(), isFalse);
         expect(customCb.isAllowed, isFalse);
 
         customCb.recordSuccess();
         expect(customState.circuitState, CircuitState.halfOpen);
         expect(customState.trialRequestInProgress, isFalse);
+        expect(customCb.isAllowed, isTrue);
         expect(customState.halfOpenSuccessCount, 2);
 
-        expect(customCb.isAllowed, isTrue);
+        expect(customCb.tryAcquireTrial(), isTrue);
         expect(customState.trialRequestInProgress, isTrue);
 
         customCb.recordSuccess();
@@ -157,11 +169,11 @@ void main() {
       customCb.recordFailure();
       await Future.delayed(const Duration(milliseconds: 150));
 
-      expect(customCb.isAllowed, isTrue);
+      expect(customCb.tryAcquireTrial(), isTrue);
       customCb.recordSuccess();
       expect(customState.halfOpenSuccessCount, 1);
 
-      expect(customCb.isAllowed, isTrue);
+      expect(customCb.tryAcquireTrial(), isTrue);
       customCb.recordFailure();
 
       expect(customState.circuitState, CircuitState.open);
