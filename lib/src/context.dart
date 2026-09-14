@@ -114,6 +114,35 @@ final class ResourceConfig {
 
   /// Creates a default configuration.
   factory ResourceConfig.defaultConfig() => ResourceConfig();
+
+  static bool _areClassifiersEqual(
+    bool Function(Object) a,
+    bool Function(Object) b,
+  ) {
+    if (identical(a, b) || a == b) return true;
+    final aDefault =
+        a == _defaultFailureClassifier || a == defaultFailureClassifier;
+    final bDefault =
+        b == _defaultFailureClassifier || b == defaultFailureClassifier;
+    return aDefault && bDefault;
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is ResourceConfig &&
+        other.runtimeType == runtimeType &&
+        other.circuitBreaker == circuitBreaker &&
+        other.retry == retry &&
+        other.throttling == throttling &&
+        other.hedging == hedging &&
+        other.timeout == timeout &&
+        _areClassifiersEqual(failureClassifier, other.failureClassifier);
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(circuitBreaker, retry, throttling, hedging, timeout);
 }
 
 /// Represents an execution target for resilience policies.
@@ -471,6 +500,22 @@ final class CircuitBreakerConfig {
       );
     }
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircuitBreakerConfig &&
+          runtimeType == other.runtimeType &&
+          consecutiveFailuresThreshold == other.consecutiveFailuresThreshold &&
+          resetTimeout == other.resetTimeout &&
+          halfOpenSuccessThreshold == other.halfOpenSuccessThreshold;
+
+  @override
+  int get hashCode => Object.hash(
+    consecutiveFailuresThreshold,
+    resetTimeout,
+    halfOpenSuccessThreshold,
+  );
 }
 
 /// Configuration for the Retry pattern with Exponential Backoff and Jitter.
@@ -587,6 +632,32 @@ final class RetryConfig {
       );
     }
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RetryConfig &&
+          runtimeType == other.runtimeType &&
+          maxAttempts == other.maxAttempts &&
+          baseDelay == other.baseDelay &&
+          maxDelay == other.maxDelay &&
+          backoffFactor == other.backoffFactor &&
+          enableJitter == other.enableJitter &&
+          minRequestsForBudget == other.minRequestsForBudget &&
+          retryBudgetRatio == other.retryBudgetRatio &&
+          budgetWindow == other.budgetWindow;
+
+  @override
+  int get hashCode => Object.hash(
+    maxAttempts,
+    baseDelay,
+    maxDelay,
+    backoffFactor,
+    enableJitter,
+    minRequestsForBudget,
+    retryBudgetRatio,
+    budgetWindow,
+  );
 }
 
 /// Configuration for Adaptive Throttling.
@@ -742,6 +813,18 @@ final class ThrottlingConfig {
         return k.sheddable;
     }
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThrottlingConfig &&
+          runtimeType == other.runtimeType &&
+          k == other.k &&
+          windowDuration == other.windowDuration &&
+          minRequests == other.minRequests;
+
+  @override
+  int get hashCode => Object.hash(k, windowDuration, minRequests);
 }
 
 /// Configuration for Request Hedging (Speculative Retries).
@@ -912,6 +995,38 @@ final class HedgingConfig {
       );
     }
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is HedgingConfig &&
+          runtimeType == other.runtimeType &&
+          delay == other.delay &&
+          enabled == other.enabled &&
+          dynamicPercentile == other.dynamicPercentile &&
+          delayMultiplier == other.delayMultiplier &&
+          minDelay == other.minDelay &&
+          maxDelay == other.maxDelay &&
+          adaptationRate == other.adaptationRate &&
+          overloadPercentile == other.overloadPercentile &&
+          maxOverloadTokens == other.maxOverloadTokens &&
+          maxConcurrentHedges == other.maxConcurrentHedges &&
+          gracePeriod == other.gracePeriod;
+
+  @override
+  int get hashCode => Object.hash(
+    delay,
+    enabled,
+    dynamicPercentile,
+    delayMultiplier,
+    minDelay,
+    maxDelay,
+    adaptationRate,
+    overloadPercentile,
+    maxOverloadTokens,
+    maxConcurrentHedges,
+    gracePeriod,
+  );
 }
 
 /// The result of checking a resource's circuit breaker state.
@@ -942,6 +1057,24 @@ enum _CheckResult {
 /// You should typically create one instance of this class and share it
 /// across your application to maintain state (like failure counts and
 /// request history) for different resources.
+///
+/// ## Resource State Lifecycle
+///
+/// Resources tracked by [ResilienceContext] go through the following lifecycle:
+///
+/// 1. **Creation**: When an operation executes or [getOrCreateState] is called for a
+///    named resource, a [ResourceState] is lazily allocated with the resource's configuration.
+/// 2. **State Sharing**: Resources sharing the same name reuse the single underlying
+///    [ResourceState], sharing failure counters, circuit breaker states, retry budgets,
+///    and hedging tokens. Re-registering the same resource name with a conflicting
+///    configuration is rejected with an [ArgumentError] to prevent accidental state clobbering.
+/// 3. **Active Tracking**: Every request, failure, trial permit acquisition, and hedge
+///    updates the state's `lastActivityTime`.
+/// 4. **Pruning and Eviction**: Resource states persist in memory for the lifetime of
+///    the context. To prevent unbounded memory growth in services with dynamic or ephemeral
+///    resource names, idle closed resources can be evicted via [pruneIdleResources].
+///    Specific states can also be evicted manually using [removeResource], or all states
+///    cleared via [clearResources].
 ///
 /// Example:
 /// ```dart
@@ -1020,15 +1153,39 @@ final class ResilienceContext {
   }
 
   /// Runs [action] within a zone that has the specified [token].
+  ///
+  /// If an outer cancellation token already exists in the current zone,
+  /// [token] is attached to it for the duration of [action].
+  /// When [action] completes (synchronously, by throwing, or when the returned
+  /// [Future] completes), [token] is detached from the parent token to prevent
+  /// memory leaks in long-lived parent tokens.
   static R runWithCancellationToken<R>(
     CancellationToken token,
     R Function() action,
   ) {
     final parent = currentCancellationToken;
-    if (parent != null) {
+    final attached = parent != null;
+    if (attached) {
       token.attach(parent);
     }
-    return runZoned(action, zoneValues: {cancellationTokenZoneKey: token});
+    try {
+      final result = runZoned(
+        action,
+        zoneValues: {cancellationTokenZoneKey: token},
+      );
+      if (attached && result is Future) {
+        return (result.whenComplete(token.detach)) as R;
+      }
+      if (attached) {
+        token.detach();
+      }
+      return result;
+    } catch (_) {
+      if (attached) {
+        token.detach();
+      }
+      rethrow;
+    }
   }
 
   final Map<String, ResourceState> _states = {};
@@ -1074,23 +1231,65 @@ final class ResilienceContext {
   /// Clears all tracked resource states.
   void clearResources() => _states.clear();
 
+  /// Prunes idle resource states that are in the [CircuitState.closed] state
+  /// and have had no activity for at least [maxIdle].
+  ///
+  /// Resource states with open or half-open circuits, active hedges, or in-flight
+  /// trial requests are not eligible for pruning to prevent resetting recovery status.
+  ///
+  /// Returns the number of evicted resource states.
+  ///
+  /// It is an error if [maxIdle] is negative.
+  int pruneIdleResources({Duration maxIdle = const Duration(minutes: 10)}) {
+    if (maxIdle < Duration.zero) {
+      throw ArgumentError.value(maxIdle, 'maxIdle', 'must be non-negative');
+    }
+    final now = clock.now();
+    final toRemove = <String>[];
+    for (final entry in _states.entries) {
+      final state = entry.value;
+      if (state.circuitState == CircuitState.closed &&
+          state.activeHedges == 0 &&
+          !state.trialRequestInProgress &&
+          !state.isExecutingTrial &&
+          now.difference(state.lastActivityTime) >= maxIdle) {
+        toRemove.add(entry.key);
+      }
+    }
+    for (final key in toRemove) {
+      _states.remove(key);
+    }
+    return toRemove.length;
+  }
+
   /// Gets or creates the [ResourceState] for a resource with [resourceName] and [config].
   ///
-  /// If a state already exists for [resourceName], its active configuration is updated
-  /// to [config] and the existing state is returned.
+  /// If a state already exists for [resourceName], verifies that its active configuration
+  /// is compatible with [config].
+  ///
+  /// It is an error if a state already exists for [resourceName] with a conflicting configuration.
   ///
   /// Performance is O(1) amortized lookup in the internal state table.
   ResourceState getOrCreateState(String resourceName, ResourceConfig config) {
-    final state = _states.putIfAbsent(resourceName, () {
-      return ResourceState(config);
-    });
-    state.config = config;
+    final existing = _states[resourceName];
+    if (existing != null) {
+      if (existing.config != config) {
+        throw ArgumentError(
+          'Resource "$resourceName" is already registered with a conflicting configuration.',
+        );
+      }
+      existing.touch();
+      return existing;
+    }
+    final state = ResourceState(config);
+    _states[resourceName] = state;
     return state;
   }
 
   /// Gets or creates the state for a specific resource.
   ResourceState _getState(Resource resource) {
     final state = getOrCreateState(resource.name, resource.config);
+    state.touch();
     state.onStateChange ??= (oldState, newState) {
       emitEvent(
         CircuitBreakerStateChangedEvent(
@@ -1588,6 +1787,14 @@ final class ResilienceContext {
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
 base class ResourceState {
+  /// The timestamp of the last recorded activity or access on this state.
+  DateTime lastActivityTime = clock.now();
+
+  /// Updates [lastActivityTime] to [timestamp] or [clock.now()].
+  void touch([DateTime? timestamp]) {
+    lastActivityTime = timestamp ?? clock.now();
+  }
+
   /// The active configuration for the resource.
   ResourceConfig _config;
 
@@ -1694,6 +1901,7 @@ base class ResourceState {
   /// Should only be mutated by the library.
   CircuitState get circuitState => _circuitState;
   set circuitState(CircuitState newState) {
+    touch();
     if (_circuitState != newState) {
       final oldState = _circuitState;
       _circuitState = newState;
@@ -1765,6 +1973,7 @@ base class ResourceState {
   /// **Internal use only.**
   @internal
   void recordLogicalRequest() {
+    touch();
     final hedgingConfig = config.hedging;
     hedgingTokens = min(
       hedgingConfig.maxOverloadTokens,
@@ -1778,6 +1987,7 @@ base class ResourceState {
   /// **Internal use only.**
   @internal
   bool tryStartHedge() {
+    touch();
     final hedgingConfig = config.hedging;
     if (activeHedges >= hedgingConfig.maxConcurrentHedges) {
       return false;
@@ -1795,6 +2005,7 @@ base class ResourceState {
   /// **Internal use only.**
   @internal
   void hedgeCompleted() {
+    touch();
     activeHedges = max(0, activeHedges - 1);
   }
 
@@ -1803,6 +2014,7 @@ base class ResourceState {
   /// **Internal use only.**
   @internal
   void recordHedgingSample({required bool isSlow}) {
+    touch();
     final hedgingConfig = config.hedging;
     if (hedgingConfig.dynamicPercentile == null) return;
 
@@ -1829,6 +2041,7 @@ base class ResourceState {
   /// **Internal use only.**
   @internal
   void recordRequest(bool accepted, Criticality criticality) {
+    touch();
     requestHistory[criticality]!.add(RequestRecord(clock.now(), accepted));
   }
 

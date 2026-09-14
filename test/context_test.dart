@@ -301,44 +301,54 @@ void main() {
       expect(identical(context.states['custom'], customState), isTrue);
     });
 
-    test('ResourceState.config is updated dynamically in _getState', () async {
-      final context = ResilienceContext();
-      final initialConfig = ResourceConfig(
-        throttling: ThrottlingConfig(windowDuration: Duration(seconds: 1)),
-      );
-      final initialResource = Resource(
-        'dynamic-config-service',
-        config: initialConfig,
-      );
+    test(
+      'conflicting config on same resource name throws ArgumentError (M5)',
+      () async {
+        final context = ResilienceContext();
+        final initialConfig = ResourceConfig(
+          throttling: ThrottlingConfig(windowDuration: Duration(seconds: 1)),
+        );
+        final initialResource = Resource(
+          'dynamic-config-service',
+          config: initialConfig,
+        );
 
-      // Triggers creation of state with initial config
-      await context.execute(
-        Operation('call', initialResource),
-        () async => 'success',
-      );
+        // Triggers creation of state with initial config
+        await context.execute(
+          Operation('call', initialResource),
+          () async => 'success',
+        );
 
-      final state = context.states[initialResource.name]!;
-      expect(
-        state.config.throttling.windowDuration,
-        equals(Duration(seconds: 1)),
-      );
+        final state = context.states[initialResource.name]!;
+        expect(
+          state.config.throttling.windowDuration,
+          equals(Duration(seconds: 1)),
+        );
 
-      // Now use a new Resource object with different config
-      final newConfig = ResourceConfig(
-        throttling: ThrottlingConfig(windowDuration: Duration(seconds: 5)),
-      );
-      final newResource = Resource('dynamic-config-service', config: newConfig);
+        // Now use a new Resource object with conflicting config
+        final newConfig = ResourceConfig(
+          throttling: ThrottlingConfig(windowDuration: Duration(seconds: 5)),
+        );
+        final newResource = Resource(
+          'dynamic-config-service',
+          config: newConfig,
+        );
 
-      // This should trigger _getState and update the config in the state
-      await context.execute(
-        Operation('call', newResource),
-        () async => 'success',
-      );
+        // Conflicting re-registration throws ArgumentError
+        expect(
+          () => context.execute(
+            Operation('call', newResource),
+            () async => 'success',
+          ),
+          throwsArgumentError,
+        );
 
-      expect(
-        state.config.throttling.windowDuration,
-        equals(Duration(seconds: 5)),
-      );
-    });
+        // State config remains untouched
+        expect(
+          state.config.throttling.windowDuration,
+          equals(Duration(seconds: 1)),
+        );
+      },
+    );
   });
 }

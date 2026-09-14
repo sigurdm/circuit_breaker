@@ -38,6 +38,7 @@ final class CircuitBreaker {
   ///
   /// Throws [CircuitBreakerOpenException] if the circuit is open.
   Future<T> execute<T>(Future<T> Function() action) async {
+    state.touch();
     final isReentrantTrial =
         state.circuitState == CircuitState.halfOpen &&
         Zone.current[_trialZoneKey] == state;
@@ -207,6 +208,7 @@ final class CircuitBreaker {
   ///
   /// Returns  if the trial permit was successfully acquired,  otherwise.
   bool tryAcquireTrial() {
+    state.touch();
     final cbConfig = config.circuitBreaker;
     final now = clock.now();
 
@@ -241,6 +243,7 @@ final class CircuitBreaker {
 
   /// Records a successful operation.
   void recordSuccess() {
+    state.touch();
     if (state.circuitState == CircuitState.halfOpen) {
       state.trialRequestInProgress = false;
       state.halfOpenSuccessCount++;
@@ -257,6 +260,7 @@ final class CircuitBreaker {
 
   /// Records a failed operation.
   void recordFailure() {
+    state.touch();
     state.failureCount++;
     state.lastFailureTime = clock.now();
 

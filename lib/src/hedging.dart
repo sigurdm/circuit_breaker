@@ -6,6 +6,26 @@ import 'exceptions.dart';
 import 'cancellation.dart';
 import 'events.dart';
 
+/// Calculates the effective hedge delay for [config] and [state].
+///
+/// If dynamic hedging is disabled ([HedgingConfig.dynamicPercentile] is null),
+/// returns [HedgingConfig.delay].
+///
+/// When dynamic hedging is enabled, multiplies the tracked dynamic delay estimate
+/// by [HedgingConfig.delayMultiplier], and clamps the final result strictly
+/// within `[config.minDelay, config.maxDelay]`.
+Duration calculateHedgeDelay(HedgingConfig config, ResourceState state) {
+  if (config.dynamicPercentile == null) {
+    return config.delay;
+  }
+  final baseEstimate = state.dynamicDelayEstimate;
+  final calculatedUs = (baseEstimate.inMicroseconds * config.delayMultiplier)
+      .round();
+  final minUs = config.minDelay.inMicroseconds;
+  final maxUs = config.maxDelay.inMicroseconds;
+  return Duration(microseconds: calculatedUs.clamp(minUs, maxUs));
+}
+
 /// Executes an operation with request hedging.
 /// The operation function receives a `Completer` that will be completed if the operation should be cancelled.
 Future<T> executeWithHedging<T>(
@@ -42,12 +62,7 @@ Future<T> executeWithHedging<T>(
   }
 
   final rawV = state.dynamicDelayEstimate;
-  final actualHedgingDelay = hedgingConfig.dynamicPercentile != null
-      ? Duration(
-          microseconds: (rawV.inMicroseconds * hedgingConfig.delayMultiplier)
-              .round(),
-        )
-      : hedgingConfig.delay;
+  final actualHedgingDelay = calculateHedgeDelay(hedgingConfig, state);
 
   bool sampleRegistered = false;
 
@@ -660,7 +675,16 @@ Future<T> hedge<T>(
     );
   }
 
-  final state = ctx.getOrCreateState(targetName, cfg);
+  final ResourceState state;
+  if (existingState != null) {
+    if (config != null) {
+      ctx.getOrCreateState(targetName, cfg);
+    }
+    state = existingState;
+    state.touch();
+  } else {
+    state = ctx.getOrCreateState(targetName, cfg);
+  }
   final h = RequestHedger(cfg, state);
   return h.execute(action);
 }
