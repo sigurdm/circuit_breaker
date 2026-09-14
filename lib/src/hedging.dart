@@ -4,6 +4,7 @@ import 'dart:math';
 import 'context.dart';
 import 'exceptions.dart';
 import 'cancellation.dart';
+import 'events.dart';
 
 /// Executes an operation with request hedging.
 /// The operation function receives a `Completer` that will be completed if the operation should be cancelled.
@@ -11,6 +12,8 @@ Future<T> executeWithHedging<T>(
   Future<T> Function(Completer<void> cancelCompleter) operation, {
   required ResourceConfig config,
   required ResourceState state,
+  Resource? resource,
+  ResilienceContext? context,
 }) async {
   final hedgingConfig = config.hedging;
 
@@ -121,6 +124,21 @@ Future<T> executeWithHedging<T>(
   Duration f2StartTime = Duration.zero;
   if (state.tryStartHedge()) {
     startedHedge = true;
+    final res = resource;
+    if (res != null) {
+      final elapsed = stopwatch.elapsed;
+      final event = HedgeFiredEvent(
+        resource: res,
+        timestamp: clock.now(),
+        delay: elapsed,
+        activeHedges: state.activeHedges,
+      );
+      if (context != null) {
+        context.emitEvent(event);
+      } else {
+        res.emitEvent(event);
+      }
+    }
     try {
       f2StartTime = stopwatch.elapsed;
       f2 = operation(c2);
@@ -304,8 +322,11 @@ final class RequestHedger {
   /// The underlying resource state for hedging tokens and delay estimates.
   final ResourceState state;
 
+  /// The resource associated with this hedger, if any.
+  final Resource? resource;
+
   /// Creates a [RequestHedger] wrapping [config] and [state].
-  RequestHedger(this.config, this.state);
+  RequestHedger(this.config, this.state, {this.resource});
 
   /// Creates a standalone [RequestHedger] instance without requiring a full [ResilienceContext].
   factory RequestHedger.standalone({
@@ -359,7 +380,12 @@ final class RequestHedger {
       timeout: timeout,
       failureClassifier: failureClassifier,
     );
-    return RequestHedger(cfg, state ?? ResourceState(cfg));
+    final res = Resource('standalone_hedger', config: cfg);
+    return RequestHedger(
+      cfg,
+      state ?? ResourceState(cfg),
+      resource: res,
+    );
   }
 
   /// Executes [action] with request hedging.
@@ -475,6 +501,7 @@ final class RequestHedger {
             wrappedAction,
             config: config,
             state: state,
+            resource: resource,
           );
           if (!executionCompleter.isCompleted) {
             executionCompleter.complete(val);
