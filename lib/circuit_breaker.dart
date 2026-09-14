@@ -42,7 +42,7 @@ export 'src/context.dart'
 export 'src/cancellation.dart' show CancellationToken;
 
 export 'src/circuit_breaker.dart' show CircuitBreaker;
-export 'src/throttling.dart' show AdaptiveThrottler, ThrottledException;
+export 'src/throttling.dart' show AdaptiveThrottler;
 export 'src/retry.dart' show Retry, retry;
 export 'src/hedging.dart' show RequestHedger, hedge, calculateHedgeDelay;
 export 'src/policy.dart' show ResiliencePolicy;
@@ -58,6 +58,8 @@ export 'src/events.dart'
         CriticalityThrottlingMetrics;
 export 'src/exceptions.dart'
     show
+        ResilienceException,
         CircuitBreakerOpenException,
+        ThrottledException,
         ResilienceTimeoutException,
         OperationCancelledException;

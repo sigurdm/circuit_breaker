@@ -116,6 +116,25 @@ final class ResourceConfig {
   /// Creates a default configuration.
   factory ResourceConfig.defaultConfig() => ResourceConfig();
 
+  /// Creates a copy of this configuration with the given fields replaced.
+  ResourceConfig copyWith({
+    CircuitBreakerConfig? circuitBreaker,
+    RetryConfig? retry,
+    ThrottlingConfig? throttling,
+    HedgingConfig? hedging,
+    Duration? timeout,
+    bool Function(Object)? failureClassifier,
+  }) {
+    return ResourceConfig(
+      circuitBreaker: circuitBreaker ?? this.circuitBreaker,
+      retry: retry ?? this.retry,
+      throttling: throttling ?? this.throttling,
+      hedging: hedging ?? this.hedging,
+      timeout: timeout ?? this.timeout,
+      failureClassifier: failureClassifier ?? this.failureClassifier,
+    );
+  }
+
   static bool _areClassifiersEqual(
     bool Function(Object) a,
     bool Function(Object) b,
@@ -502,6 +521,20 @@ final class CircuitBreakerConfig {
     }
   }
 
+  /// Creates a copy of this configuration with the given fields replaced.
+  CircuitBreakerConfig copyWith({
+    int? consecutiveFailuresThreshold,
+    Duration? resetTimeout,
+    int? halfOpenSuccessThreshold,
+  }) {
+    return CircuitBreakerConfig(
+      consecutiveFailuresThreshold:
+          consecutiveFailuresThreshold ?? this.consecutiveFailuresThreshold,
+      resetTimeout: resetTimeout ?? this.resetTimeout,
+      halfOpenSuccessThreshold:
+          halfOpenSuccessThreshold ?? this.halfOpenSuccessThreshold,
+    );
+  }
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -634,6 +667,28 @@ final class RetryConfig {
     }
   }
 
+  /// Creates a copy of this configuration with the given fields replaced.
+  RetryConfig copyWith({
+    int? maxAttempts,
+    Duration? baseDelay,
+    Duration? maxDelay,
+    double? backoffFactor,
+    bool? enableJitter,
+    int? minRequestsForBudget,
+    double? retryBudgetRatio,
+    Duration? budgetWindow,
+  }) {
+    return RetryConfig(
+      maxAttempts: maxAttempts ?? this.maxAttempts,
+      baseDelay: baseDelay ?? this.baseDelay,
+      maxDelay: maxDelay ?? this.maxDelay,
+      backoffFactor: backoffFactor ?? this.backoffFactor,
+      enableJitter: enableJitter ?? this.enableJitter,
+      minRequestsForBudget: minRequestsForBudget ?? this.minRequestsForBudget,
+      retryBudgetRatio: retryBudgetRatio ?? this.retryBudgetRatio,
+      budgetWindow: budgetWindow ?? this.budgetWindow,
+    );
+  }
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -815,6 +870,24 @@ final class ThrottlingConfig {
     }
   }
 
+  /// Creates a copy of this configuration with the given fields replaced.
+  ThrottlingConfig copyWith({
+    ({
+      double criticalPlus,
+      double critical,
+      double sheddablePlus,
+      double sheddable,
+    })?
+    k,
+    Duration? windowDuration,
+    int? minRequests,
+  }) {
+    return ThrottlingConfig.withCriticality(
+      k: k ?? this.k,
+      windowDuration: windowDuration ?? this.windowDuration,
+      minRequests: minRequests ?? this.minRequests,
+    );
+  }
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -997,6 +1070,34 @@ final class HedgingConfig {
     }
   }
 
+  /// Creates a copy of this configuration with the given fields replaced.
+  HedgingConfig copyWith({
+    Duration? delay,
+    bool? enabled,
+    double? dynamicPercentile,
+    double? delayMultiplier,
+    Duration? minDelay,
+    Duration? maxDelay,
+    double? adaptationRate,
+    double? overloadPercentile,
+    double? maxOverloadTokens,
+    int? maxConcurrentHedges,
+    Duration? gracePeriod,
+  }) {
+    return HedgingConfig(
+      delay: delay ?? this.delay,
+      enabled: enabled ?? this.enabled,
+      dynamicPercentile: dynamicPercentile ?? this.dynamicPercentile,
+      delayMultiplier: delayMultiplier ?? this.delayMultiplier,
+      minDelay: minDelay ?? this.minDelay,
+      maxDelay: maxDelay ?? this.maxDelay,
+      adaptationRate: adaptationRate ?? this.adaptationRate,
+      overloadPercentile: overloadPercentile ?? this.overloadPercentile,
+      maxOverloadTokens: maxOverloadTokens ?? this.maxOverloadTokens,
+      maxConcurrentHedges: maxConcurrentHedges ?? this.maxConcurrentHedges,
+      gracePeriod: gracePeriod ?? this.gracePeriod,
+    );
+  }
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
