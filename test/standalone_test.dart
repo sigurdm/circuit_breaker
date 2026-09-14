@@ -3,6 +3,9 @@ import 'package:test/test.dart' hide Retry;
 import 'package:circuit_breaker/circuit_breaker.dart';
 
 void main() {
+  tearDown(() {
+    ResilienceContext.defaultContext.clearResources();
+  });
   group('Standalone Retry', () {
     test('succeeds on first attempt without retries', () async {
       final r = Retry.standalone(maxAttempts: 3, baseDelay: Duration.zero);
@@ -15,6 +18,15 @@ void main() {
 
       expect(res, equals('success'));
       expect(attempts, equals(1));
+    });
+
+    test('accepts custom state parameter', () {
+      final cfg = ResourceConfig(
+        retry: RetryConfig(maxAttempts: 2, baseDelay: Duration.zero),
+      );
+      final state = ResourceState(cfg);
+      final r = Retry.standalone(config: cfg.retry, state: state);
+      expect(r.state, same(state));
     });
 
     test('retries transient failures and eventually succeeds', () async {
@@ -309,6 +321,139 @@ void main() {
         throwsA(isA<ResilienceTimeoutException>()),
       );
     });
+
+    test(
+      'enforces retry budget ratio across consecutive calls to retry()',
+      () async {
+        final config = RetryConfig(
+          minRequestsForBudget: 4,
+          retryBudgetRatio: 0.2,
+          maxAttempts: 3,
+          baseDelay: Duration.zero,
+        );
+
+        int totalAttempts = 0;
+
+        // Call 1: fails once, succeeds on attempt 2 (1 initial, 1 retry).
+        // Total requests in state: 2, retries: 1.
+        final res1 = await retry(() async {
+          totalAttempts++;
+          if (totalAttempts == 1) throw Exception('fail 1');
+          return 'ok 1';
+        }, config: config);
+        expect(res1, equals('ok 1'));
+        expect(totalAttempts, equals(2));
+
+        // Call 2: fails once, succeeds on attempt 2 (1 initial, 1 retry).
+        // Total requests in state: 4, retries: 2.
+        final res2 = await retry(() async {
+          totalAttempts++;
+          if (totalAttempts == 3) throw Exception('fail 2');
+          return 'ok 2';
+        }, config: config);
+        expect(res2, equals('ok 2'));
+        expect(totalAttempts, equals(4));
+
+        // Call 3: attempt 1 fails (totalAttempts becomes 5).
+        // Total requests in state: 5 >= minRequestsForBudget (4).
+        // Total retries in state: 2.
+        // Next retry check: (2 + 1) > (5 + 1) * 0.2 => 3 > 1.2 => Budget exceeded!
+        // Attempt 2 must NOT be made; Exception must be rethrown immediately!
+        await expectLater(
+          retry(() async {
+            totalAttempts++;
+            throw Exception('fail 3');
+          }, config: config),
+          throwsA(
+            isA<Exception>().having(
+              (e) => e.toString(),
+              'message',
+              contains('fail 3'),
+            ),
+          ),
+        );
+        expect(totalAttempts, equals(5));
+      },
+    );
+
+    test(
+      'isolates retry budget when using custom resourceName or context',
+      () async {
+        final config = RetryConfig(
+          minRequestsForBudget: 2,
+          retryBudgetRatio: 0.1,
+          maxAttempts: 3,
+          baseDelay: Duration.zero,
+        );
+
+        // Exhaust budget on resource-a
+        await retry(
+          () async => 'ok-initial',
+          config: config,
+          resourceName: 'resource-a',
+        );
+        await expectLater(
+          retry(
+            () async => throw Exception('error-a'),
+            config: config,
+            resourceName: 'resource-a',
+          ),
+          throwsA(isA<Exception>()),
+        );
+
+        // resource-b should have a clean budget and succeed with retry
+        int attemptsB = 0;
+        final resB = await retry(
+          () async {
+            attemptsB++;
+            if (attemptsB == 1) throw Exception('error-b');
+            return 'ok-b';
+          },
+          config: config,
+          resourceName: 'resource-b',
+        );
+        expect(resB, equals('ok-b'));
+        expect(attemptsB, equals(2));
+
+        // Custom context is also completely isolated
+        final customCtx = ResilienceContext();
+        int attemptsCustom = 0;
+        final resCustom = await retry(
+          () async {
+            attemptsCustom++;
+            if (attemptsCustom == 1) throw Exception('error-custom');
+            return 'ok-custom';
+          },
+          config: config,
+          context: customCtx,
+        );
+        expect(resCustom, equals('ok-custom'));
+        expect(attemptsCustom, equals(2));
+      },
+    );
+
+    test(
+      'preserves existing state config when subsequent call omits config',
+      () async {
+        int attempts = 0;
+        final config = RetryConfig(maxAttempts: 4, baseDelay: Duration.zero);
+
+        await retry(
+          () async => 'init',
+          config: config,
+          resourceName: 'preserved-retry',
+        );
+
+        final res = await retry(() async {
+          attempts++;
+          if (attempts < 4) throw Exception('retry $attempts');
+          return 'done';
+        }, resourceName: 'preserved-retry');
+
+        expect(res, equals('done'));
+        expect(attempts, equals(4));
+      },
+    );
   });
 
   group('Standalone RequestHedger', () {
@@ -325,6 +470,15 @@ void main() {
 
       expect(res, equals('primary'));
       expect(calls, equals(1));
+    });
+
+    test('accepts custom state parameter', () {
+      final cfg = ResourceConfig(
+        hedging: HedgingConfig(delay: const Duration(milliseconds: 50)),
+      );
+      final state = ResourceState(cfg);
+      final h = RequestHedger.standalone(config: cfg.hedging, state: state);
+      expect(h.state, same(state));
     });
 
     test('sends hedged request when primary is delayed', () async {
@@ -540,6 +694,216 @@ void main() {
         expect(result, equals('hedge-fast'));
         expect(attempt1Token, isNotNull);
         expect(attempt1Token!.isCancelled, isTrue);
+      },
+    );
+
+    test(
+      'hedge() respects token bucket and caps duplicate requests across consecutive calls',
+      () async {
+        int totalInvocations = 0;
+        final config = HedgingConfig(
+          maxOverloadTokens: 2.0,
+          overloadPercentile: 0.9,
+          delay: const Duration(milliseconds: 20),
+        );
+
+        Future<String> slowAction() async {
+          totalInvocations++;
+          await Future.delayed(const Duration(milliseconds: 80));
+          return 'ok';
+        }
+
+        // Call 1: primary slow -> hedges (takes 1 token, leaving 1.0 token). Invocations += 2.
+        final res1 = await hedge(slowAction, config: config);
+        expect(res1, equals('ok'));
+        expect(totalInvocations, equals(2));
+
+        // Call 2: primary slow -> hedges (takes 1 token, leaving 0.1 token). Invocations += 2.
+        final res2 = await hedge(slowAction, config: config);
+        expect(res2, equals('ok'));
+        expect(totalInvocations, equals(4));
+
+        // Call 3: primary slow -> token bucket has 0.2 < 1.0 token, so hedge is blocked!
+        // Only primary runs. Invocations += 1.
+        final res3 = await hedge(slowAction, config: config);
+        expect(res3, equals('ok'));
+        expect(totalInvocations, equals(5));
+
+        final defaultState =
+            ResilienceContext.defaultContext.states['__adhoc_hedge__'];
+        expect(defaultState, isNotNull);
+        expect(defaultState!.hedgingTokens, lessThan(1.0));
+      },
+    );
+
+    test(
+      'hedge() adapts dynamicDelayEstimate across consecutive calls',
+      () async {
+        final config = HedgingConfig(
+          dynamicPercentile: 0.9,
+          delayMultiplier: 1.5,
+          minDelay: const Duration(milliseconds: 10),
+          maxDelay: const Duration(milliseconds: 500),
+          delay: const Duration(milliseconds: 30),
+          adaptationRate: 2.0,
+        );
+
+        final stateBefore =
+            ResilienceContext.defaultContext.states['dynamic_hedge'];
+        expect(stateBefore, isNull);
+
+        // Call 1: primary slow (takes 80ms)
+        await hedge(
+          () async {
+            await Future.delayed(const Duration(milliseconds: 80));
+            return 'done1';
+          },
+          config: config,
+          resourceName: 'dynamic_hedge',
+        );
+
+        final stateAfter =
+            ResilienceContext.defaultContext.states['dynamic_hedge'];
+        expect(stateAfter, isNotNull);
+        expect(
+          stateAfter!.dynamicDelayEstimate,
+          greaterThan(const Duration(milliseconds: 30)),
+        );
+      },
+    );
+
+    test(
+      'hedge() enforces maxConcurrentHedges across concurrent calls',
+      () async {
+        final config = HedgingConfig(
+          maxConcurrentHedges: 1,
+          maxOverloadTokens: 10.0,
+          delay: const Duration(milliseconds: 20),
+        );
+
+        int totalCalls = 0;
+        final completer1 = Completer<void>();
+        final completer2 = Completer<void>();
+
+        final f1 = hedge(
+          () async {
+            totalCalls++;
+            await completer1.future;
+            return 'res1';
+          },
+          config: config,
+          resourceName: 'concurrent_hedge',
+        );
+
+        final f2 = hedge(
+          () async {
+            totalCalls++;
+            await completer2.future;
+            return 'res2';
+          },
+          config: config,
+          resourceName: 'concurrent_hedge',
+        );
+
+        await Future.delayed(const Duration(milliseconds: 60));
+
+        completer1.complete();
+        completer2.complete();
+
+        await Future.wait([f1, f2]);
+
+        // f1 had primary + hedge = 2 calls.
+        // f2 had primary only (hedge blocked by maxConcurrentHedges) = 1 call.
+        expect(totalCalls, equals(3));
+      },
+    );
+
+    test(
+      'hedge() isolates state with custom resourceName or context',
+      () async {
+        final config = HedgingConfig(
+          maxOverloadTokens: 1.0,
+          overloadPercentile: 0.9,
+          delay: const Duration(milliseconds: 20),
+        );
+
+        int callsA = 0;
+        await hedge(
+          () async {
+            callsA++;
+            await Future.delayed(const Duration(milliseconds: 60));
+            return 'a';
+          },
+          config: config,
+          resourceName: 'hedge-a',
+        );
+        expect(callsA, equals(2));
+
+        await hedge(
+          () async {
+            callsA++;
+            await Future.delayed(const Duration(milliseconds: 60));
+            return 'a';
+          },
+          config: config,
+          resourceName: 'hedge-a',
+        );
+        expect(callsA, equals(3));
+
+        int callsB = 0;
+        await hedge(
+          () async {
+            callsB++;
+            await Future.delayed(const Duration(milliseconds: 60));
+            return 'b';
+          },
+          config: config,
+          resourceName: 'hedge-b',
+        );
+        expect(callsB, equals(2));
+      },
+    );
+
+    test(
+      'preserves existing state config when subsequent call omits config',
+      () async {
+        final config = HedgingConfig(
+          maxOverloadTokens: 5.0,
+          delay: const Duration(milliseconds: 20),
+        );
+
+        await hedge(
+          () async => 'init',
+          config: config,
+          resourceName: 'preserved-hedge',
+        );
+
+        // Call without config, default delay
+        int callsDefault = 0;
+        final resDefault = await hedge(() async {
+          callsDefault++;
+          if (callsDefault == 1) {
+            await Future.delayed(const Duration(milliseconds: 60));
+          }
+          return 'ok-default';
+        }, resourceName: 'preserved-hedge');
+        expect(resDefault, equals('ok-default'));
+
+        // Call without config, custom delay
+        int callsCustom = 0;
+        final resCustom = await hedge(
+          () async {
+            callsCustom++;
+            if (callsCustom == 1) {
+              await Future.delayed(const Duration(milliseconds: 60));
+            }
+            return 'ok-custom';
+          },
+          delay: const Duration(milliseconds: 10),
+          resourceName: 'preserved-hedge',
+        );
+        expect(resCustom, equals('ok-custom'));
+        expect(callsCustom, equals(2));
       },
     );
   });

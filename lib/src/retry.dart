@@ -170,6 +170,7 @@ final class Retry {
     Duration? timeout,
     bool Function(Object)? failureClassifier,
     bool Function(Object)? retryOn,
+    ResourceState? state,
   }) {
     final retryConfig =
         config ??
@@ -186,7 +187,7 @@ final class Retry {
       failureClassifier: failureClassifier,
     );
     final effectiveRetryOn = retryOn ?? failureClassifier;
-    return Retry(cfg, ResourceState(cfg), retryOn: effectiveRetryOn);
+    return Retry(cfg, state ?? ResourceState(cfg), retryOn: effectiveRetryOn);
   }
 
   /// Executes [action] with retry logic, exponential backoff, and jitter.
@@ -314,6 +315,15 @@ final class Retry {
 ///
 /// This convenience function provides an ad-hoc, one-liner way to retry an operation
 /// without instantiating a [Retry] object.
+///
+/// Shares resilience state (including retry history and budget enforcement) across calls
+/// via [context] (defaulting to [ResilienceContext.defaultContext]) keyed by [resourceName]
+/// (defaulting to `'__adhoc_retry__'`).
+///
+/// Throws [ResilienceTimeoutException] if the operation exceeds the deadline or configured [timeout].
+/// Throws [OperationCancelledException] if cancelled via the ambient cancellation token.
+/// Rethrows the last exception thrown by [action] once retries are exhausted or if the error
+/// is not retryable or throttled by the retry budget.
 Future<T> retry<T>(
   Future<T> Function() action, {
   int maxAttempts = 3,
@@ -325,21 +335,54 @@ Future<T> retry<T>(
   Duration? timeout,
   bool Function(Object)? failureClassifier,
   RetryConfig? config,
+  ResilienceContext? context,
+  String? resourceName,
 }) {
-  final effectiveConfig =
-      config ??
-      RetryConfig(
-        maxAttempts: maxAttempts,
-        baseDelay: baseDelay,
-        maxDelay: maxDelay,
-        backoffFactor: backoffFactor,
-        enableJitter: enableJitter,
-      );
-  final r = Retry.standalone(
-    config: effectiveConfig,
-    timeout: timeout,
-    failureClassifier: failureClassifier,
-    retryOn: retryOn,
-  );
+  final targetName = resourceName ?? '__adhoc_retry__';
+  final ctx = context ?? ResilienceContext.defaultContext;
+  final existingState = ctx.states[targetName];
+
+  final RetryConfig effectiveConfig;
+  if (config != null) {
+    effectiveConfig = config;
+  } else if (existingState != null &&
+      maxAttempts == 3 &&
+      baseDelay == const Duration(milliseconds: 100) &&
+      maxDelay == const Duration(seconds: 10) &&
+      backoffFactor == 2.0 &&
+      enableJitter == true) {
+    effectiveConfig = existingState.config.retry;
+  } else {
+    effectiveConfig = RetryConfig(
+      maxAttempts: maxAttempts,
+      baseDelay: baseDelay,
+      maxDelay: maxDelay,
+      backoffFactor: backoffFactor,
+      enableJitter: enableJitter,
+    );
+  }
+
+  final ResourceConfig cfg;
+  if (existingState != null) {
+    cfg = ResourceConfig(
+      circuitBreaker: existingState.config.circuitBreaker,
+      throttling: existingState.config.throttling,
+      hedging: existingState.config.hedging,
+      retry: effectiveConfig,
+      timeout: timeout ?? existingState.config.timeout,
+      failureClassifier:
+          failureClassifier ?? existingState.config.failureClassifier,
+    );
+  } else {
+    cfg = ResourceConfig(
+      retry: effectiveConfig,
+      timeout: timeout,
+      failureClassifier: failureClassifier,
+    );
+  }
+
+  final state = ctx.getOrCreateState(targetName, cfg);
+  final effectiveRetryOn = retryOn ?? failureClassifier;
+  final r = Retry(cfg, state, retryOn: effectiveRetryOn);
   return r.execute(action);
 }

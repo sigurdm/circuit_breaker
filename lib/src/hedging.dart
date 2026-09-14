@@ -242,6 +242,7 @@ final class RequestHedger {
     Duration? delay,
     Duration? timeout,
     bool Function(Object)? failureClassifier,
+    ResourceState? state,
   }) {
     final HedgingConfig hedgingConfig;
     if (config != null) {
@@ -270,7 +271,7 @@ final class RequestHedger {
       timeout: timeout,
       failureClassifier: failureClassifier,
     );
-    return RequestHedger(cfg, ResourceState(cfg));
+    return RequestHedger(cfg, state ?? ResourceState(cfg));
   }
 
   /// Executes [action] with request hedging.
@@ -434,18 +435,84 @@ final class RequestHedger {
 ///
 /// This convenience function provides an ad-hoc, one-liner way to execute an operation
 /// with speculative hedging without manually instantiating a [RequestHedger].
+///
+/// Shares resilience state (including token bucket overload protection, concurrency
+/// counters, and dynamic latency estimates) across calls via [context] (defaulting to
+/// [ResilienceContext.defaultContext]) keyed by [resourceName] (defaulting to
+/// `'__adhoc_hedge__'`).
+///
+/// Throws [ResilienceTimeoutException] if the operation exceeds the deadline or configured [timeout].
+/// Throws [OperationCancelledException] if cancelled via the ambient cancellation token.
+/// Rethrows any failure thrown by [action] if hedging does not succeed.
 Future<T> hedge<T>(
   Future<T> Function() action, {
   Duration delay = const Duration(milliseconds: 500),
   Duration? timeout,
   bool Function(Object)? failureClassifier,
   HedgingConfig? config,
+  ResilienceContext? context,
+  String? resourceName,
 }) {
-  final h = RequestHedger.standalone(
-    config: config,
-    delay: delay,
-    timeout: timeout,
-    failureClassifier: failureClassifier,
-  );
+  final targetName = resourceName ?? '__adhoc_hedge__';
+  final ctx = context ?? ResilienceContext.defaultContext;
+  final existingState = ctx.states[targetName];
+
+  final HedgingConfig hedgingConfig;
+  if (config != null) {
+    hedgingConfig = config.enabled
+        ? config
+        : HedgingConfig(
+            delay: config.delay,
+            enabled: true,
+            dynamicPercentile: config.dynamicPercentile,
+            delayMultiplier: config.delayMultiplier,
+            minDelay: config.minDelay,
+            maxDelay: config.maxDelay,
+            adaptationRate: config.adaptationRate,
+            overloadPercentile: config.overloadPercentile,
+            maxOverloadTokens: config.maxOverloadTokens,
+            maxConcurrentHedges: config.maxConcurrentHedges,
+          );
+  } else if (existingState != null) {
+    hedgingConfig = delay != const Duration(milliseconds: 500)
+        ? HedgingConfig(
+            delay: delay,
+            enabled: true,
+            dynamicPercentile: existingState.config.hedging.dynamicPercentile,
+            delayMultiplier: existingState.config.hedging.delayMultiplier,
+            minDelay: existingState.config.hedging.minDelay,
+            maxDelay: existingState.config.hedging.maxDelay,
+            adaptationRate: existingState.config.hedging.adaptationRate,
+            overloadPercentile: existingState.config.hedging.overloadPercentile,
+            maxOverloadTokens: existingState.config.hedging.maxOverloadTokens,
+            maxConcurrentHedges:
+                existingState.config.hedging.maxConcurrentHedges,
+          )
+        : existingState.config.hedging;
+  } else {
+    hedgingConfig = HedgingConfig(enabled: true, delay: delay);
+  }
+
+  final ResourceConfig cfg;
+  if (existingState != null) {
+    cfg = ResourceConfig(
+      circuitBreaker: existingState.config.circuitBreaker,
+      throttling: existingState.config.throttling,
+      hedging: hedgingConfig,
+      retry: existingState.config.retry,
+      timeout: timeout ?? existingState.config.timeout,
+      failureClassifier:
+          failureClassifier ?? existingState.config.failureClassifier,
+    );
+  } else {
+    cfg = ResourceConfig(
+      hedging: hedgingConfig,
+      timeout: timeout,
+      failureClassifier: failureClassifier,
+    );
+  }
+
+  final state = ctx.getOrCreateState(targetName, cfg);
+  final h = RequestHedger(cfg, state);
   return h.execute(action);
 }
