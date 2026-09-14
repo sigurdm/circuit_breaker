@@ -265,4 +265,80 @@ void main() {
       expect(await trialFuture, equals('trial-success'));
     });
   });
+
+  group('Dynamic Resource & Config Management', () {
+    test(
+      'ResilienceContext dynamic resource eviction APIs prevent memory leaks',
+      () async {
+        final context = ResilienceContext();
+        final res1 = Resource('tenant-1');
+        final res2 = Resource('tenant-2');
+
+        await context.execute(res1, () async => 'ok');
+        await context.execute(res2, () async => 'ok');
+
+        expect(context.resourceCount, equals(2));
+        expect(context.containsResource('tenant-1'), isTrue);
+        expect(context.containsResource('tenant-2'), isTrue);
+
+        // Evict tenant-1
+        expect(context.removeResource('tenant-1'), isTrue);
+        expect(context.containsResource('tenant-1'), isFalse);
+        expect(context.resourceCount, equals(1));
+
+        // Clear all
+        context.clearResources();
+        expect(context.resourceCount, equals(0));
+        expect(context.containsResource('tenant-2'), isFalse);
+      },
+    );
+
+    test('ResilienceContext.states supports custom state injection', () {
+      final context = ResilienceContext();
+      final config = ResourceConfig();
+      final customState = ResourceState(config);
+      context.states['custom'] = customState;
+      expect(identical(context.states['custom'], customState), isTrue);
+    });
+
+    test('ResourceState.config is updated dynamically in _getState', () async {
+      final context = ResilienceContext();
+      final initialConfig = ResourceConfig(
+        throttling: ThrottlingConfig(windowDuration: Duration(seconds: 1)),
+      );
+      final initialResource = Resource(
+        'dynamic-config-service',
+        config: initialConfig,
+      );
+
+      // Triggers creation of state with initial config
+      await context.execute(
+        Operation('call', initialResource),
+        () async => 'success',
+      );
+
+      final state = context.states[initialResource.name]!;
+      expect(
+        state.config.throttling.windowDuration,
+        equals(Duration(seconds: 1)),
+      );
+
+      // Now use a new Resource object with different config
+      final newConfig = ResourceConfig(
+        throttling: ThrottlingConfig(windowDuration: Duration(seconds: 5)),
+      );
+      final newResource = Resource('dynamic-config-service', config: newConfig);
+
+      // This should trigger _getState and update the config in the state
+      await context.execute(
+        Operation('call', newResource),
+        () async => 'success',
+      );
+
+      expect(
+        state.config.throttling.windowDuration,
+        equals(Duration(seconds: 5)),
+      );
+    });
+  });
 }
