@@ -832,8 +832,7 @@ void drawUI() {
     '--- TRAFFIC METRICS (cumulative & rolling rates) --------------------------------\x1B[K',
   );
   buf.writeln(
-    formatRow('Criticality:', 'critPlus', 'critical', 'shedPlus', 'sheddable') +
-        '\x1B[K',
+    '${formatRow('Criticality:', 'critPlus', 'critical', 'shedPlus', 'sheddable')}\x1B[K',
   );
   buf.writeln(
     '--------------------------------------------------------------------------------\x1B[K',
@@ -845,127 +844,35 @@ void drawUI() {
   }
 
   buf.writeln(
-    formatRow(
-          'Requests:',
-          formatMetricValue(critPlusRolling.total, critPlusCumulative.total),
-          formatMetricValue(critRolling.total, critCumulative.total),
-          formatMetricValue(shedPlusRolling.total, shedPlusCumulative.total),
-          formatMetricValue(shedRolling.total, shedCumulative.total),
-        ) +
-        '\x1B[K',
+    '${formatRow('Requests:', formatMetricValue(critPlusRolling.total, critPlusCumulative.total), formatMetricValue(critRolling.total, critCumulative.total), formatMetricValue(shedPlusRolling.total, shedPlusCumulative.total), formatMetricValue(shedRolling.total, shedCumulative.total))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Success:',
-          formatMetricValue(
-            critPlusRolling.success,
-            critPlusCumulative.success,
-          ),
-          formatMetricValue(critRolling.success, critCumulative.success),
-          formatMetricValue(
-            shedPlusRolling.success,
-            shedPlusCumulative.success,
-          ),
-          formatMetricValue(shedRolling.success, shedCumulative.success),
-        ) +
-        '\x1B[K',
+    '${formatRow('Success:', formatMetricValue(critPlusRolling.success, critPlusCumulative.success), formatMetricValue(critRolling.success, critCumulative.success), formatMetricValue(shedPlusRolling.success, shedPlusCumulative.success), formatMetricValue(shedRolling.success, shedCumulative.success))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Failure:',
-          formatMetricValue(
-            critPlusRolling.failure,
-            critPlusCumulative.failure,
-          ),
-          formatMetricValue(critRolling.failure, critCumulative.failure),
-          formatMetricValue(
-            shedPlusRolling.failure,
-            shedPlusCumulative.failure,
-          ),
-          formatMetricValue(shedRolling.failure, shedCumulative.failure),
-        ) +
-        '\x1B[K',
+    '${formatRow('Failure:', formatMetricValue(critPlusRolling.failure, critPlusCumulative.failure), formatMetricValue(critRolling.failure, critCumulative.failure), formatMetricValue(shedPlusRolling.failure, shedPlusCumulative.failure), formatMetricValue(shedRolling.failure, shedCumulative.failure))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Timeout:',
-          formatMetricValue(
-            critPlusRolling.timeout,
-            critPlusCumulative.timeout,
-          ),
-          formatMetricValue(critRolling.timeout, critCumulative.timeout),
-          formatMetricValue(
-            shedPlusRolling.timeout,
-            shedPlusCumulative.timeout,
-          ),
-          formatMetricValue(shedRolling.timeout, shedCumulative.timeout),
-        ) +
-        '\x1B[K',
+    '${formatRow('Timeout:', formatMetricValue(critPlusRolling.timeout, critPlusCumulative.timeout), formatMetricValue(critRolling.timeout, critCumulative.timeout), formatMetricValue(shedPlusRolling.timeout, shedPlusCumulative.timeout), formatMetricValue(shedRolling.timeout, shedCumulative.timeout))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Throttled:',
-          formatMetricValue(
-            critPlusRolling.throttled,
-            critPlusCumulative.throttled,
-          ),
-          formatMetricValue(critRolling.throttled, critCumulative.throttled),
-          formatMetricValue(
-            shedPlusRolling.throttled,
-            shedPlusCumulative.throttled,
-          ),
-          formatMetricValue(shedRolling.throttled, shedCumulative.throttled),
-        ) +
-        '\x1B[K',
+    '${formatRow('Throttled:', formatMetricValue(critPlusRolling.throttled, critPlusCumulative.throttled), formatMetricValue(critRolling.throttled, critCumulative.throttled), formatMetricValue(shedPlusRolling.throttled, shedPlusCumulative.throttled), formatMetricValue(shedRolling.throttled, shedCumulative.throttled))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Blocked (CB):',
-          formatMetricValue(
-            critPlusRolling.blockedCB,
-            critPlusCumulative.blockedCB,
-          ),
-          formatMetricValue(critRolling.blockedCB, critCumulative.blockedCB),
-          formatMetricValue(
-            shedPlusRolling.blockedCB,
-            shedPlusCumulative.blockedCB,
-          ),
-          formatMetricValue(shedRolling.blockedCB, shedCumulative.blockedCB),
-        ) +
-        '\x1B[K',
+    '${formatRow('Blocked (CB):', formatMetricValue(critPlusRolling.blockedCB, critPlusCumulative.blockedCB), formatMetricValue(critRolling.blockedCB, critCumulative.blockedCB), formatMetricValue(shedPlusRolling.blockedCB, shedPlusCumulative.blockedCB), formatMetricValue(shedRolling.blockedCB, shedCumulative.blockedCB))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Hedges:',
-          formatMetricValue(critPlusRolling.hedges, critPlusCumulative.hedges),
-          formatMetricValue(critRolling.hedges, critCumulative.hedges),
-          formatMetricValue(shedPlusRolling.hedges, shedPlusCumulative.hedges),
-          formatMetricValue(shedRolling.hedges, shedCumulative.hedges),
-        ) +
-        '\x1B[K',
+    '${formatRow('Hedges:', formatMetricValue(critPlusRolling.hedges, critPlusCumulative.hedges), formatMetricValue(critRolling.hedges, critCumulative.hedges), formatMetricValue(shedPlusRolling.hedges, shedPlusCumulative.hedges), formatMetricValue(shedRolling.hedges, shedCumulative.hedges))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Retries:',
-          formatMetricValue(
-            critPlusRolling.retries,
-            critPlusCumulative.retries,
-          ),
-          formatMetricValue(critRolling.retries, critCumulative.retries),
-          formatMetricValue(
-            shedPlusRolling.retries,
-            shedPlusCumulative.retries,
-          ),
-          formatMetricValue(shedRolling.retries, shedCumulative.retries),
-        ) +
-        '\x1B[K',
+    '${formatRow('Retries:', formatMetricValue(critPlusRolling.retries, critPlusCumulative.retries), formatMetricValue(critRolling.retries, critCumulative.retries), formatMetricValue(shedPlusRolling.retries, shedPlusCumulative.retries), formatMetricValue(shedRolling.retries, shedCumulative.retries))}\x1B[K',
   );
 
   // 2. THROTTLING STATES (last 10s)
@@ -990,36 +897,15 @@ void drawUI() {
   }
 
   buf.writeln(
-    formatRow(
-          'Window Requests:',
-          winReqStr(Criticality.criticalPlus),
-          winReqStr(Criticality.critical),
-          winReqStr(Criticality.sheddablePlus),
-          winReqStr(Criticality.sheddable),
-        ) +
-        '\x1B[K',
+    '${formatRow('Window Requests:', winReqStr(Criticality.criticalPlus), winReqStr(Criticality.critical), winReqStr(Criticality.sheddablePlus), winReqStr(Criticality.sheddable))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Window Accepts:',
-          winAccStr(Criticality.criticalPlus),
-          winAccStr(Criticality.critical),
-          winAccStr(Criticality.sheddablePlus),
-          winAccStr(Criticality.sheddable),
-        ) +
-        '\x1B[K',
+    '${formatRow('Window Accepts:', winAccStr(Criticality.criticalPlus), winAccStr(Criticality.critical), winAccStr(Criticality.sheddablePlus), winAccStr(Criticality.sheddable))}\x1B[K',
   );
 
   buf.writeln(
-    formatRow(
-          'Rejection Prob:',
-          rejProbStr(Criticality.criticalPlus),
-          rejProbStr(Criticality.critical),
-          rejProbStr(Criticality.sheddablePlus),
-          rejProbStr(Criticality.sheddable),
-        ) +
-        '\x1B[K',
+    '${formatRow('Rejection Prob:', rejProbStr(Criticality.criticalPlus), rejProbStr(Criticality.critical), rejProbStr(Criticality.sheddablePlus), rejProbStr(Criticality.sheddable))}\x1B[K',
   );
 
   // 3. SHARED MECHANISM STATES
@@ -1059,7 +945,7 @@ void drawUI() {
   } else {
     cbStateLine += 'N/A';
   }
-  buf.writeln(cbStateLine + '\x1B[K');
+  buf.writeln('$cbStateLine\x1B[K');
 
   String retryBudgetLine = 'Retry Budget:      ';
   if (resState != null) {
@@ -1073,7 +959,7 @@ void drawUI() {
   } else {
     retryBudgetLine += 'N/A';
   }
-  buf.writeln(retryBudgetLine + '\x1B[K');
+  buf.writeln('$retryBudgetLine\x1B[K');
 
   // 4. VISUAL TRENDS (last 20s)
   buf.writeln(
@@ -1191,7 +1077,7 @@ void drawUI() {
     final remainingSecs = state.scenarioTicksRemaining * 0.05;
     scenarioLine += ' (${remainingSecs.toStringAsFixed(1)}s remaining)';
   }
-  buf.writeln(scenarioLine + '\x1B[K');
+  buf.writeln('$scenarioLine\x1B[K');
   buf.writeln('Status: ${state.lastStatusMessage}\x1B[K');
 
   // 7. LIVE EVENT LOG (last 5)

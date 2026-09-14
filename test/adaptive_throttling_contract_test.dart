@@ -437,12 +437,15 @@ void main() {
           int sheddablePlusThrottled = 0;
 
           for (int i = 0; i < 1000; i++) {
-            if (throttler.shouldThrottle(Criticality.sheddable))
+            if (throttler.shouldThrottle(Criticality.sheddable)) {
               sheddableThrottled++;
-            if (throttler.shouldThrottle(Criticality.critical))
+            }
+            if (throttler.shouldThrottle(Criticality.critical)) {
               criticalThrottled++;
-            if (throttler.shouldThrottle(Criticality.sheddablePlus))
+            }
+            if (throttler.shouldThrottle(Criticality.sheddablePlus)) {
               sheddablePlusThrottled++;
+            }
           }
 
           expect(sheddableThrottled, greaterThan(criticalThrottled));

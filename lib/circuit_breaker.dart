@@ -18,7 +18,7 @@
 /// ([ResiliencePolicy], [CircuitBreaker], [AdaptiveThrottler], [Retry], [RequestHedger],
 /// or top-level [retry]) can be used for progressive adoption with zero boilerplate.
 /// See `example/main.dart` for a complete end-to-end example.
-library circuit_breaker;
+library;
 
 export 'src/context.dart'
     show

@@ -188,9 +188,7 @@ Future<T> executeWithHedging<T>(
         final timeoutRemaining = config.timeout != null
             ? config.timeout! - stopwatch.elapsed
             : null;
-        final deadlineRemaining = deadline != null
-            ? deadline.difference(clock.now())
-            : null;
+        final deadlineRemaining = deadline?.difference(clock.now());
 
         Duration? effectiveRemaining;
         if (timeoutRemaining != null && deadlineRemaining != null) {
