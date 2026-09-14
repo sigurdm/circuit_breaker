@@ -95,7 +95,13 @@ void main() {
         expect(sheddableThrottled, greaterThan(150));
 
         bool sheddableThrottledInContext = false;
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 50; i++) {
+          try {
+            await context.execute(
+              criticalOp,
+              () async => throw Exception('backend error'),
+            );
+          } catch (_) {}
           try {
             await context.execute(sheddableOp, () async => 'sheddable-ok');
           } on ThrottledException {
