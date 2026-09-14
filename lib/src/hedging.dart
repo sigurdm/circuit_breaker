@@ -136,7 +136,6 @@ Future<T> executeWithHedging<T>(
 
   bool startedHedge = false;
   Future<T>? f2;
-  Duration f2StartTime = Duration.zero;
   if (state.tryStartHedge()) {
     startedHedge = true;
     final res = resource;
@@ -155,14 +154,10 @@ Future<T> executeWithHedging<T>(
       }
     }
     try {
-      f2StartTime = stopwatch.elapsed;
       f2 = operation(c2);
     } catch (e) {
       state.hedgeCompleted();
-      state.hedgingTokens = min(
-        hedgingConfig.maxOverloadTokens,
-        state.hedgingTokens + 1.0,
-      );
+      state.refundHedgingToken();
       earlyRegTimer?.cancel();
       if (!c1.isCompleted) c1.complete();
       if (!c2.isCompleted) c2.complete();
@@ -263,7 +258,6 @@ Future<T> executeWithHedging<T>(
     Future<T> source,
     Completer<void> otherCancel, {
     required bool isHedge,
-    required Duration startTime,
   }) {
     source
         .then((value) {
@@ -313,8 +307,8 @@ Future<T> executeWithHedging<T>(
         });
   }
 
-  handleResult(f1, c2, isHedge: false, startTime: Duration.zero);
-  handleResult(f2!, c1, isHedge: true, startTime: f2StartTime);
+  handleResult(f1, c2, isHedge: false);
+  handleResult(f2!, c1, isHedge: true);
 
   try {
     return await resultCompleter.future;
@@ -352,25 +346,11 @@ final class RequestHedger {
   }) {
     final HedgingConfig hedgingConfig;
     if (config != null) {
-      hedgingConfig = config.enabled
-          ? (gracePeriod != null
-                ? HedgingConfig(
-                    delay: config.delay,
-                    enabled: config.enabled,
-                    dynamicPercentile: config.dynamicPercentile,
-                    delayMultiplier: config.delayMultiplier,
-                    minDelay: config.minDelay,
-                    maxDelay: config.maxDelay,
-                    adaptationRate: config.adaptationRate,
-                    overloadPercentile: config.overloadPercentile,
-                    maxOverloadTokens: config.maxOverloadTokens,
-                    maxConcurrentHedges: config.maxConcurrentHedges,
-                    gracePeriod: gracePeriod,
-                  )
-                : config)
-          : HedgingConfig(
-              delay: config.delay,
-              enabled: true,
+      final effectiveDelay = delay ?? config.delay;
+      hedgingConfig = (delay != null || gracePeriod != null)
+          ? HedgingConfig(
+              delay: effectiveDelay,
+              enabled: config.enabled,
               dynamicPercentile: config.dynamicPercentile,
               delayMultiplier: config.delayMultiplier,
               minDelay: config.minDelay,
@@ -380,7 +360,8 @@ final class RequestHedger {
               maxOverloadTokens: config.maxOverloadTokens,
               maxConcurrentHedges: config.maxConcurrentHedges,
               gracePeriod: gracePeriod ?? config.gracePeriod,
-            );
+            )
+          : config;
     } else {
       hedgingConfig = HedgingConfig(
         enabled: true,
@@ -583,25 +564,13 @@ Future<T> hedge<T>(
 
   final HedgingConfig hedgingConfig;
   if (config != null) {
-    hedgingConfig = config.enabled
-        ? (gracePeriod != null
-              ? HedgingConfig(
-                  delay: config.delay,
-                  enabled: config.enabled,
-                  dynamicPercentile: config.dynamicPercentile,
-                  delayMultiplier: config.delayMultiplier,
-                  minDelay: config.minDelay,
-                  maxDelay: config.maxDelay,
-                  adaptationRate: config.adaptationRate,
-                  overloadPercentile: config.overloadPercentile,
-                  maxOverloadTokens: config.maxOverloadTokens,
-                  maxConcurrentHedges: config.maxConcurrentHedges,
-                  gracePeriod: gracePeriod,
-                )
-              : config)
-        : HedgingConfig(
-            delay: config.delay,
-            enabled: true,
+    final effectiveDelay =
+        delay != const Duration(milliseconds: 500) ? delay : config.delay;
+    hedgingConfig = (delay != const Duration(milliseconds: 500) ||
+            gracePeriod != null)
+        ? HedgingConfig(
+            delay: effectiveDelay,
+            enabled: config.enabled,
             dynamicPercentile: config.dynamicPercentile,
             delayMultiplier: config.delayMultiplier,
             minDelay: config.minDelay,
@@ -611,7 +580,8 @@ Future<T> hedge<T>(
             maxOverloadTokens: config.maxOverloadTokens,
             maxConcurrentHedges: config.maxConcurrentHedges,
             gracePeriod: gracePeriod ?? config.gracePeriod,
-          );
+          )
+        : config;
   } else if (existingState != null) {
     hedgingConfig = delay != const Duration(milliseconds: 500)
         ? HedgingConfig(
