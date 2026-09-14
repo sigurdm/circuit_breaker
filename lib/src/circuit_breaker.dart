@@ -46,19 +46,44 @@ final class CircuitBreaker {
       return await action();
     }
 
+    final cbConfig = config.circuitBreaker;
     final bool allowed;
-    if (state.circuitState == CircuitState.halfOpen) {
-      if (state.isExecutingTrial) {
+
+    if (state.circuitState == CircuitState.closed) {
+      allowed = true;
+    } else if (state.circuitState == CircuitState.open) {
+      final now = DateTime.now();
+      var failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.isBefore(failureTime)) {
+        failureTime = now;
+        if (state.lastFailureTime != null) state.lastFailureTime = now;
+        state.lastStateChange = now;
+      }
+      if (now.difference(failureTime) > cbConfig.resetTimeout) {
+        state.circuitState = CircuitState.halfOpen;
+        state.trialRequestInProgress = true;
+        allowed = true;
+      } else {
+        allowed = false;
+      }
+    } else if (state.circuitState == CircuitState.halfOpen) {
+      if (state.isTrialExpired(cbConfig.resetTimeout)) {
+        state.trialRequestInProgress = false;
+        state.isExecutingTrial = false;
+        state.trialRequestInProgress = true;
+        allowed = true;
+      } else if (state.isExecutingTrial) {
         // Another trial is actively executing: block concurrent requests!
         allowed = false;
       } else if (state.trialRequestInProgress) {
-        // Trial permit was already claimed (e.g. by a preceding cb.isAllowed check)
+        // Trial permit was already claimed (e.g. by tryAcquireTrial())
         allowed = true;
       } else {
-        allowed = isAllowed;
+        state.trialRequestInProgress = true;
+        allowed = true;
       }
     } else {
-      allowed = isAllowed;
+      allowed = false;
     }
 
     if (!allowed) {
@@ -68,6 +93,7 @@ final class CircuitBreaker {
     final isRootTrial = state.circuitState == CircuitState.halfOpen;
     if (isRootTrial) {
       state.isExecutingTrial = true;
+      state.trialStartTime = DateTime.now();
     }
 
     try {
@@ -98,7 +124,44 @@ final class CircuitBreaker {
   Future<T> Function(A) wrapUnary<T, A>(Future<T> Function(A) action) =>
       (A arg) => execute(() => action(arg));
 
-  /// Checks if the request is allowed to proceed.
+  /// Whether the circuit breaker is open and failing fast.
+  bool get isOpen {
+    if (state.circuitState == CircuitState.open) {
+      final now = DateTime.now();
+      var failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.isBefore(failureTime)) {
+        failureTime = now;
+      }
+      if (now.difference(failureTime) > config.circuitBreaker.resetTimeout) {
+        state.circuitState = CircuitState.halfOpen;
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// Whether the circuit breaker is half-open and testing recovery.
+  bool get isHalfOpen {
+    if (state.circuitState == CircuitState.open) {
+      final now = DateTime.now();
+      var failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.isBefore(failureTime)) {
+        failureTime = now;
+      }
+      if (now.difference(failureTime) > config.circuitBreaker.resetTimeout) {
+        state.circuitState = CircuitState.halfOpen;
+        return true;
+      }
+    }
+    return state.circuitState == CircuitState.halfOpen;
+  }
+
+  /// Whether the circuit breaker is closed and functioning normally.
+  bool get isClosed => state.circuitState == CircuitState.closed;
+
+  /// Checks if a request is allowed to proceed without claiming a trial permit
+  /// or mutating trial execution state.
   bool get isAllowed {
     final cbConfig = config.circuitBreaker;
 
@@ -115,7 +178,45 @@ final class CircuitBreaker {
         state.lastStateChange = now;
       }
       if (now.difference(failureTime) > cbConfig.resetTimeout) {
-        // Transition to half-open and start trial
+        state.circuitState = CircuitState.halfOpen;
+        return true;
+      }
+      return false;
+    }
+
+    if (state.circuitState == CircuitState.halfOpen) {
+      if (state.isTrialExpired(cbConfig.resetTimeout)) {
+        return true;
+      }
+      if (state.isExecutingTrial || state.trialRequestInProgress) {
+        return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  /// Attempts to acquire a permit to execute a trial request.
+  ///
+  /// If the circuit is in [CircuitState.open] and the reset timeout has elapsed,
+  /// transitions the circuit to [CircuitState.halfOpen] and claims the trial permit.
+  /// If the circuit is in [CircuitState.halfOpen] and no trial is currently in
+  /// progress (or the active trial has expired), claims the trial permit.
+  ///
+  /// Returns  if the trial permit was successfully acquired,  otherwise.
+  bool tryAcquireTrial() {
+    final cbConfig = config.circuitBreaker;
+    final now = DateTime.now();
+
+    if (state.circuitState == CircuitState.open) {
+      var failureTime = state.lastFailureTime ?? state.lastStateChange;
+      if (now.isBefore(failureTime)) {
+        failureTime = now;
+        if (state.lastFailureTime != null) state.lastFailureTime = now;
+        state.lastStateChange = now;
+      }
+      if (now.difference(failureTime) > cbConfig.resetTimeout) {
         state.circuitState = CircuitState.halfOpen;
         state.trialRequestInProgress = true;
         return true;
@@ -124,11 +225,14 @@ final class CircuitBreaker {
     }
 
     if (state.circuitState == CircuitState.halfOpen) {
-      if (!state.trialRequestInProgress) {
-        state.trialRequestInProgress = true;
-        return true;
+      if (state.isTrialExpired(cbConfig.resetTimeout)) {
+        state.trialRequestInProgress = false;
+        state.isExecutingTrial = false;
+      } else if (state.isExecutingTrial || state.trialRequestInProgress) {
+        return false;
       }
-      return false;
+      state.trialRequestInProgress = true;
+      return true;
     }
 
     return false;
