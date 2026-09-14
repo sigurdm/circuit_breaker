@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:clock/clock.dart';
-import 'dart:math';
 import 'context.dart';
 import 'exceptions.dart';
 import 'cancellation.dart';
@@ -566,22 +565,19 @@ Future<T> hedge<T>(
   if (config != null) {
     final effectiveDelay =
         delay != const Duration(milliseconds: 500) ? delay : config.delay;
-    hedgingConfig = (delay != const Duration(milliseconds: 500) ||
-            gracePeriod != null)
-        ? HedgingConfig(
-            delay: effectiveDelay,
-            enabled: config.enabled,
-            dynamicPercentile: config.dynamicPercentile,
-            delayMultiplier: config.delayMultiplier,
-            minDelay: config.minDelay,
-            maxDelay: config.maxDelay,
-            adaptationRate: config.adaptationRate,
-            overloadPercentile: config.overloadPercentile,
-            maxOverloadTokens: config.maxOverloadTokens,
-            maxConcurrentHedges: config.maxConcurrentHedges,
-            gracePeriod: gracePeriod ?? config.gracePeriod,
-          )
-        : config;
+    hedgingConfig = HedgingConfig(
+      delay: effectiveDelay,
+      enabled: config.enabled || (config.dynamicPercentile != null || config.delay != const Duration(milliseconds: 500)),
+      dynamicPercentile: config.dynamicPercentile,
+      delayMultiplier: config.delayMultiplier,
+      minDelay: config.minDelay,
+      maxDelay: config.maxDelay,
+      adaptationRate: config.adaptationRate,
+      overloadPercentile: config.overloadPercentile,
+      maxOverloadTokens: config.maxOverloadTokens,
+      maxConcurrentHedges: config.maxConcurrentHedges,
+      gracePeriod: gracePeriod ?? config.gracePeriod,
+    );
   } else if (existingState != null) {
     hedgingConfig = delay != const Duration(milliseconds: 500)
         ? HedgingConfig(
