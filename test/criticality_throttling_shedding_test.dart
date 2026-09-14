@@ -95,7 +95,7 @@ void main() {
         expect(sheddableThrottled, greaterThan(150));
 
         bool sheddableThrottledInContext = false;
-        for (int i = 0; i < 50; i++) {
+        for (int i = 0; i < 100; i++) {
           try {
             await context.execute(sheddableOp, () async => 'sheddable-ok');
           } on ThrottledException {
