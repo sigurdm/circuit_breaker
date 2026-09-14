@@ -78,27 +78,32 @@ void main() {
 
           // Trial 1 starts
           expect(cb.isAllowed, isTrue);
+          expect(cb.tryAcquireTrial(), isTrue);
           expect(state.circuitState, equals(CircuitState.halfOpen));
           expect(state.trialRequestInProgress, isTrue);
+          expect(cb.tryAcquireTrial(), isFalse);
           expect(cb.isAllowed, isFalse);
 
           cb.recordSuccess();
           expect(state.circuitState, equals(CircuitState.halfOpen));
           expect(state.trialRequestInProgress, isFalse);
+          expect(cb.isAllowed, isTrue);
           expect(state.halfOpenSuccessCount, equals(1));
 
           // Trial 2 starts
-          expect(cb.isAllowed, isTrue);
+          expect(cb.tryAcquireTrial(), isTrue);
           expect(state.trialRequestInProgress, isTrue);
+          expect(cb.tryAcquireTrial(), isFalse);
           expect(cb.isAllowed, isFalse);
 
           cb.recordSuccess();
           expect(state.circuitState, equals(CircuitState.halfOpen));
           expect(state.trialRequestInProgress, isFalse);
+          expect(cb.isAllowed, isTrue);
           expect(state.halfOpenSuccessCount, equals(2));
 
           // Trial 3 starts
-          expect(cb.isAllowed, isTrue);
+          expect(cb.tryAcquireTrial(), isTrue);
           expect(state.trialRequestInProgress, isTrue);
 
           cb.recordSuccess();
@@ -255,8 +260,13 @@ void main() {
           cb.recordFailure();
           await Future.delayed(const Duration(milliseconds: 70));
 
-          expect(cb.isAllowed, isTrue); // First allowed
-          expect(cb.isAllowed, isFalse); // Second rejected
+          expect(cb.isAllowed, isTrue);
+          expect(cb.tryAcquireTrial(), isTrue); // First allowed
+          expect(cb.tryAcquireTrial(), isFalse); // Second rejected
+          expect(
+            cb.isAllowed,
+            isFalse,
+          ); // Request not allowed while trial in flight
         },
       );
 

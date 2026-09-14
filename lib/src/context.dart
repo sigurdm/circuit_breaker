@@ -1088,6 +1088,7 @@ final class ResilienceContext {
   }
 
   /// Gets or creates the state for a specific resource.
+  ResourceState _getState(Resource resource) {
     final state = getOrCreateState(resource.name, resource.config);
     state.onStateChange ??= (oldState, newState) {
       emitEvent(
@@ -1349,7 +1350,7 @@ final class ResilienceContext {
         emitEvent(
           RequestThrottledEvent(
             resource: resource,
-            timestamp: DateTime.now(),
+            timestamp: clock.now(),
             criticality: target.criticality,
             rejectionProbability: prob,
           ),
@@ -1543,7 +1544,7 @@ final class ResilienceContext {
       emitEvent(
         OperationCompletedEvent(
           resource: resource,
-          timestamp: DateTime.now(),
+          timestamp: clock.now(),
           operation: op,
           duration: stopwatch.elapsed,
           isSuccess: true,
@@ -1554,7 +1555,7 @@ final class ResilienceContext {
       emitEvent(
         OperationCompletedEvent(
           resource: resource,
-          timestamp: DateTime.now(),
+          timestamp: clock.now(),
           operation: op,
           duration: stopwatch.elapsed,
           isSuccess: false,

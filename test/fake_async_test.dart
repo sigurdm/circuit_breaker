@@ -47,10 +47,12 @@ void main() {
             // 4. After reset timeout expires: transition to HalfOpen for trial
             async.elapse(const Duration(seconds: 16)); // total 46s > 45s
             expect(cb.isAllowed, isTrue);
+            expect(cb.tryAcquireTrial(), isTrue);
             expect(state.circuitState, CircuitState.halfOpen);
 
             // Concurrent requests during trial are blocked
             expect(cb.isAllowed, isFalse);
+            expect(cb.tryAcquireTrial(), isFalse);
 
             // 5. First trial succeeds: remains in half-open until threshold
             cb.recordSuccess();

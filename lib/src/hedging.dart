@@ -381,11 +381,7 @@ final class RequestHedger {
       failureClassifier: failureClassifier,
     );
     final res = Resource('standalone_hedger', config: cfg);
-    return RequestHedger(
-      cfg,
-      state ?? ResourceState(cfg),
-      resource: res,
-    );
+    return RequestHedger(cfg, state ?? ResourceState(cfg), resource: res);
   }
 
   /// Executes [action] with request hedging.
@@ -617,7 +613,8 @@ Future<T> hedge<T>(
             maxOverloadTokens: existingState.config.hedging.maxOverloadTokens,
             maxConcurrentHedges:
                 existingState.config.hedging.maxConcurrentHedges,
-            gracePeriod: gracePeriod ?? existingState.config.hedging.gracePeriod,
+            gracePeriod:
+                gracePeriod ?? existingState.config.hedging.gracePeriod,
           )
         : (gracePeriod != null
               ? HedgingConfig(
@@ -625,12 +622,10 @@ Future<T> hedge<T>(
                   enabled: existingState.config.hedging.enabled,
                   dynamicPercentile:
                       existingState.config.hedging.dynamicPercentile,
-                  delayMultiplier:
-                      existingState.config.hedging.delayMultiplier,
+                  delayMultiplier: existingState.config.hedging.delayMultiplier,
                   minDelay: existingState.config.hedging.minDelay,
                   maxDelay: existingState.config.hedging.maxDelay,
-                  adaptationRate:
-                      existingState.config.hedging.adaptationRate,
+                  adaptationRate: existingState.config.hedging.adaptationRate,
                   overloadPercentile:
                       existingState.config.hedging.overloadPercentile,
                   maxOverloadTokens:

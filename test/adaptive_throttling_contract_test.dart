@@ -1,4 +1,5 @@
 import 'package:circuit_breaker/circuit_breaker.dart';
+import 'package:clock/clock.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -450,33 +451,55 @@ void main() {
         },
       );
 
-      test('throttling state is isolated per criticality', () {
-        final config = ResourceConfig(
-          throttling: ThrottlingConfig(k: 2.0, minRequests: 1),
-        );
-        final state = ResourceState(config);
-        final throttler = AdaptiveThrottler(config, state);
-
-        for (int i = 0; i < 10; i++) {
-          state.requestHistory[Criticality.sheddable]!.add(
-            RequestRecord(DateTime.now(), false),
+      test(
+        'failures on critical operations cause sheddable traffic to be throttled first',
+        () {
+          final config = ResourceConfig(
+            throttling: ThrottlingConfig(k: 2.0, minRequests: 1),
           );
-        }
+          final state = ResourceState(config);
+          final throttler = AdaptiveThrottler(config, state);
 
-        int sheddableThrottled = 0;
-        for (int i = 0; i < 100; i++) {
-          if (throttler.shouldThrottle(Criticality.sheddable))
-            sheddableThrottled++;
-        }
-        expect(sheddableThrottled, greaterThan(50));
+          // 10 requests: 6 accepted, 4 failed (40% failure rate)
+          for (int i = 0; i < 6; i++) {
+            state.requestHistory[Criticality.critical]!.add(
+              RequestRecord(clock.now(), true),
+            );
+          }
+          for (int i = 0; i < 4; i++) {
+            state.requestHistory[Criticality.critical]!.add(
+              RequestRecord(clock.now(), false),
+            );
+          }
 
-        int criticalThrottled = 0;
-        for (int i = 0; i < 100; i++) {
-          if (throttler.shouldThrottle(Criticality.critical))
-            criticalThrottled++;
-        }
-        expect(criticalThrottled, equals(0));
-      });
+          // Critical (K = 2.0) tolerates up to 50% failure rate -> rejection probability 0
+          expect(
+            throttler.rejectionProbability(Criticality.critical),
+            equals(0.0),
+          );
+          // Sheddable (K = 1.2) tolerates only up to 16.7% failure rate -> rejection probability > 0
+          expect(
+            throttler.rejectionProbability(Criticality.sheddable),
+            greaterThan(0.0),
+          );
+
+          int criticalThrottled = 0;
+          for (int i = 0; i < 100; i++) {
+            if (throttler.shouldThrottle(Criticality.critical)) {
+              criticalThrottled++;
+            }
+          }
+          expect(criticalThrottled, equals(0));
+
+          int sheddableThrottled = 0;
+          for (int i = 0; i < 1000; i++) {
+            if (throttler.shouldThrottle(Criticality.sheddable)) {
+              sheddableThrottled++;
+            }
+          }
+          expect(sheddableThrottled, greaterThan(100));
+        },
+      );
     });
 
     group('Standalone & Monitoring APIs', () {
