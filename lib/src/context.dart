@@ -1689,20 +1689,54 @@ class ResourceState {
     return requestHistory[criticality]?.where((r) => r.accepted).length ?? 0;
   }
 
-  /// Returns the calculated rejection probability for that criticality.
-  double getThrottlingRejectionProbability(Criticality criticality) {
+  /// Returns the total number of request records across all criticalities in the throttling window.
+  int get totalThrottlingRequests {
     cleanHistory(DateTime.now());
-    final list = requestHistory[criticality];
-    final requests = list?.length ?? 0;
-    if (requests < config.throttling.minRequests || requests == 0) return 0.0;
-    int accepts = 0;
-    if (list != null) {
+    int total = 0;
+    for (final list in requestHistory.values) {
+      total += list.length;
+    }
+    return total;
+  }
+
+  /// Returns the total number of accepted request records across all criticalities in the throttling window.
+  int get totalThrottlingAccepts {
+    cleanHistory(DateTime.now());
+    int total = 0;
+    for (final list in requestHistory.values) {
       for (final r in list) {
-        if (r.accepted) accepts++;
+        if (r.accepted) total++;
       }
     }
+    return total;
+  }
+
+  /// Returns the calculated rejection probability for [criticality] based on overall resource health.
+  ///
+  /// Evaluates the criticality-specific `K` factor against the aggregate request
+  /// and accept counts across all criticalities for this resource:
+  /// `P = max(0.0, (totalRequests - K * totalAccepts) / (totalRequests + 1))`
+  ///
+  /// Returns `0.0` if total requests across all criticalities are below [ThrottlingConfig.minRequests]
+  /// or if there are no requests.
+  double getThrottlingRejectionProbability(Criticality criticality) {
+    cleanHistory(DateTime.now());
+    int totalRequests = 0;
+    int totalAccepts = 0;
+    for (final list in requestHistory.values) {
+      totalRequests += list.length;
+      for (final r in list) {
+        if (r.accepted) totalAccepts++;
+      }
+    }
+    if (totalRequests < config.throttling.minRequests || totalRequests == 0) {
+      return 0.0;
+    }
     final kVal = config.throttling.getK(criticality);
-    return max(0.0, (requests - kVal * accepts) / (requests + 1));
+    return max(
+      0.0,
+      (totalRequests - kVal * totalAccepts) / (totalRequests + 1),
+    );
   }
 }
 

@@ -85,32 +85,75 @@ void main() {
       },
     );
 
-    test('throttling is isolated per criticality', () {
-      // Add 10 failed requests for sheddable
-      for (int i = 0; i < 10; i++) {
-        state.requestHistory[Criticality.sheddable]!.add(
-          RequestRecord(DateTime.now(), false),
+    test(
+      'failures on critical operations cause sheddable traffic to be throttled first',
+      () {
+        // 10 requests on critical: 6 accepted, 4 failed (40% failure rate)
+        for (int i = 0; i < 6; i++) {
+          state.requestHistory[Criticality.critical]!.add(
+            RequestRecord(DateTime.now(), true),
+          );
+        }
+        for (int i = 0; i < 4; i++) {
+          state.requestHistory[Criticality.critical]!.add(
+            RequestRecord(DateTime.now(), false),
+          );
+        }
+
+        // Overall health: totalRequests = 10, totalAccepts = 6
+        // For critical (K = 2.0): P = max(0, (10 - 2.0 * 6) / 11) = 0.0 (tolerates up to 50% failures)
+        // For sheddable (K = 1.2): P = max(0, (10 - 1.2 * 6) / 11) = 2.8 / 11 ≈ 0.2545 > 0
+        expect(throttler.rejectionProbability(Criticality.critical), 0.0);
+        expect(
+          throttler.rejectionProbability(Criticality.sheddable),
+          closeTo(2.8 / 11, 0.001),
         );
-      }
 
-      // sheddable should be throttled
-      int sheddableThrottled = 0;
-      for (int i = 0; i < 100; i++) {
-        if (throttler.shouldThrottle(Criticality.sheddable)) {
-          sheddableThrottled++;
+        // Critical should never be throttled
+        int criticalThrottled = 0;
+        for (int i = 0; i < 100; i++) {
+          if (throttler.shouldThrottle(Criticality.critical)) {
+            criticalThrottled++;
+          }
         }
-      }
-      expect(sheddableThrottled, greaterThan(50));
+        expect(criticalThrottled, 0);
 
-      // critical should NOT be throttled
-      int criticalThrottled = 0;
-      for (int i = 0; i < 100; i++) {
-        if (throttler.shouldThrottle(Criticality.critical)) {
-          criticalThrottled++;
+        // Sheddable should experience throttling
+        int sheddableThrottled = 0;
+        for (int i = 0; i < 1000; i++) {
+          if (throttler.shouldThrottle(Criticality.sheddable)) {
+            sheddableThrottled++;
+          }
         }
-      }
-      expect(criticalThrottled, 0);
-    });
+        expect(sheddableThrottled, greaterThan(150));
+      },
+    );
+
+    test(
+      'critical backend outage throttles sheddable traffic even with zero previous sheddable requests',
+      () {
+        // 200 failed critical requests, 0 sheddable requests recorded
+        for (int i = 0; i < 200; i++) {
+          state.requestHistory[Criticality.critical]!.add(
+            RequestRecord(DateTime.now(), false),
+          );
+        }
+
+        // Sheddable traffic must be throttled based on backend overload
+        final shedP = throttler.rejectionProbability(Criticality.sheddable);
+        final critP = throttler.rejectionProbability(Criticality.critical);
+        expect(shedP, closeTo(200 / 201, 0.001));
+        expect(critP, closeTo(200 / 201, 0.001));
+
+        int sheddableThrottled = 0;
+        for (int i = 0; i < 100; i++) {
+          if (throttler.shouldThrottle(Criticality.sheddable)) {
+            sheddableThrottled++;
+          }
+        }
+        expect(sheddableThrottled, greaterThan(80));
+      },
+    );
   });
   group('Criticality-Aware Throttling Config', () {
     test('default constructor applies formula with spread: 1.0', () {
