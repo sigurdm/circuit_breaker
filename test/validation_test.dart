@@ -259,6 +259,13 @@ void main() {
           throwsArgumentError,
         );
       });
+
+      test('gracePeriod < Duration.zero throws ArgumentError', () {
+        expect(
+          () => HedgingConfig(gracePeriod: const Duration(milliseconds: -1)),
+          throwsArgumentError,
+        );
+      });
     });
 
     group('Resource', () {
