@@ -230,7 +230,7 @@ final class Retry {
   }) async {
     final parentToken = ResilienceContext.currentCancellationToken;
     if (parentToken != null && parentToken.isCancelled) {
-      throw const OperationCancelledException();
+      throw OperationCancelledException('Operation was cancelled', parentToken);
     }
 
     final parentDeadline = ResilienceContext.currentDeadline;
@@ -246,7 +246,10 @@ final class Retry {
                     : localDeadline));
 
     if (effectiveDeadline != null && clock.now().isAfter(effectiveDeadline)) {
-      throw ResilienceTimeoutException('Deadline exceeded before execution');
+      throw ResilienceTimeoutException(
+        'Deadline exceeded before execution',
+        timeout: config.timeout,
+      );
     }
 
     final executionToken = CancellationToken();
@@ -259,7 +262,12 @@ final class Retry {
       executionToken.onCancelled
           .then((_) {
             if (!topLevelCancel.isCompleted) {
-              topLevelCancel.complete(const OperationCancelledException());
+              topLevelCancel.complete(
+                OperationCancelledException(
+                  'Operation was cancelled',
+                  executionToken,
+                ),
+              );
             }
           })
           .catchError((_, __) {}),
@@ -275,6 +283,7 @@ final class Retry {
             topLevelCancel.complete(
               ResilienceTimeoutException(
                 'Operation timed out (deadline exceeded)',
+                timeout: config.timeout,
               ),
             );
           }

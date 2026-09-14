@@ -1,3 +1,4 @@
+import 'cancellation.dart';
 import 'dart:async';
 
 import 'context.dart';
@@ -19,6 +20,9 @@ final class _PolicyTarget implements ResilienceTarget {
 
   @override
   RetryConfig? get retryOverride => null;
+
+  @override
+  Duration? get timeoutOverride => null;
 }
 
 /// A standalone composite resilience policy.
@@ -85,15 +89,12 @@ final class ResiliencePolicy {
     Future<T> Function() action, {
     bool Function(Object)? retryOn,
     Criticality criticality = Criticality.critical,
+    Duration? timeout,
   }) {
-    if (criticality == Criticality.critical) {
-      return _context.execute(_resource, action, retryOn: retryOn);
-    }
-    return _context.execute(
-      _PolicyTarget(_resource, criticality),
-      action,
-      retryOn: retryOn,
-    );
+    final target = criticality == Criticality.critical
+        ? _resource
+        : _PolicyTarget(_resource, criticality);
+    return _context.execute(target, action, retryOn: retryOn, timeout: timeout);
   }
 
   /// Executes [action] with cancellation support protected by this resilience policy.
@@ -101,14 +102,18 @@ final class ResiliencePolicy {
     Future<T> Function(Completer<void> cancelCompleter) action, {
     bool Function(Object)? retryOn,
     Criticality criticality = Criticality.critical,
+    Duration? timeout,
+    CancellationToken? cancellationToken,
   }) {
-    if (criticality == Criticality.critical) {
-      return _context.executeCancelable(_resource, action, retryOn: retryOn);
-    }
+    final target = criticality == Criticality.critical
+        ? _resource
+        : _PolicyTarget(_resource, criticality);
     return _context.executeCancelable(
-      _PolicyTarget(_resource, criticality),
+      target,
       action,
       retryOn: retryOn,
+      timeout: timeout,
+      cancellationToken: cancellationToken,
     );
   }
 

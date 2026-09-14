@@ -180,6 +180,9 @@ abstract interface class ResilienceTarget {
 
   /// Optional override for retry configuration.
   RetryConfig? get retryOverride;
+
+  /// Optional override for operation timeout.
+  Duration? get timeoutOverride;
 }
 
 /// Represents a remote service or component.
@@ -206,6 +209,9 @@ final class Resource implements ResilienceTarget {
 
   @override
   RetryConfig? get retryOverride => null;
+
+  @override
+  Duration? get timeoutOverride => null;
 
   /// Creates a [Resource].
   ///
@@ -310,12 +316,14 @@ final class Resource implements ResilienceTarget {
     HedgingConfig? hedgingOverride,
     RetryConfig? retryOverride,
     Criticality criticality = Criticality.critical,
+    Duration? timeout,
   }) => Operation(
     name,
     this,
     hedgingOverride: hedgingOverride,
     retryOverride: retryOverride,
     criticality: criticality,
+    timeout: timeout,
   );
 }
 
@@ -356,22 +364,32 @@ final class Operation implements ResilienceTarget {
   @override
   final RetryConfig? retryOverride;
 
+  /// Optional override for timeout.
+  final Duration? timeout;
+
+  @override
+  Duration? get timeoutOverride => timeout;
+
   /// The criticality of this operation.
   @override
   final Criticality criticality;
 
   /// Creates an [Operation].
   ///
-  /// Throws [ArgumentError] if [name] is empty.
+  /// It is an error if [name] is empty or if [timeout] is non-null and <= Duration.zero.
   Operation(
     this.name,
     this.resource, {
     this.hedgingOverride,
     this.retryOverride,
     this.criticality = Criticality.critical,
+    this.timeout,
   }) {
     if (name.trim().isEmpty) {
       throw ArgumentError.value(name, 'name', 'must be non-empty');
+    }
+    if (timeout != null && timeout! <= Duration.zero) {
+      throw ArgumentError.value(timeout, 'timeout', 'must be positive');
     }
   }
 }
@@ -409,6 +427,9 @@ final class BoundResource implements ResilienceTarget {
   @override
   RetryConfig? get retryOverride => resource.retryOverride;
 
+  @override
+  Duration? get timeoutOverride => resource.timeoutOverride;
+
   /// The state of this resource in the bound context.
   ResourceState get state => context._getState(resource);
 
@@ -416,13 +437,22 @@ final class BoundResource implements ResilienceTarget {
   Future<T> execute<T>(
     Future<T> Function() action, {
     bool Function(Object)? retryOn,
-  }) => context.execute(this, action, retryOn: retryOn);
+    Duration? timeout,
+  }) => context.execute(this, action, retryOn: retryOn, timeout: timeout);
 
   /// Executes a cancelable operation on this resource.
   Future<T> executeCancelable<T>(
     Future<T> Function(Completer<void> cancelCompleter) action, {
     bool Function(Object)? retryOn,
-  }) => context.executeCancelable(this, action, retryOn: retryOn);
+    Duration? timeout,
+    CancellationToken? cancellationToken,
+  }) => context.executeCancelable(
+    this,
+    action,
+    retryOn: retryOn,
+    timeout: timeout,
+    cancellationToken: cancellationToken,
+  );
 
   /// Wraps a nullary function with this resource's resilience policies.
   Future<T> Function() wrap<T>(
@@ -448,12 +478,14 @@ final class BoundResource implements ResilienceTarget {
     HedgingConfig? hedgingOverride,
     RetryConfig? retryOverride,
     Criticality criticality = Criticality.critical,
+    Duration? timeout,
   }) => Operation(
     name,
     resource,
     hedgingOverride: hedgingOverride,
     retryOverride: retryOverride,
     criticality: criticality,
+    timeout: timeout,
   );
 }
 
@@ -1213,9 +1245,10 @@ final class ResilienceContext {
     ResilienceTarget target,
     Future<T> Function() action, {
     bool Function(Object)? retryOn,
+    Duration? timeout,
   }) {
     final ctx = target is BoundResource ? target.context : defaultContext;
-    return ctx.execute(target, action, retryOn: retryOn);
+    return ctx.execute(target, action, retryOn: retryOn, timeout: timeout);
   }
 
   /// Runs [action] with cancellation support protected by the policies of [target]
@@ -1224,9 +1257,17 @@ final class ResilienceContext {
     ResilienceTarget target,
     Future<T> Function(Completer<void> cancelCompleter) action, {
     bool Function(Object)? retryOn,
+    Duration? timeout,
+    CancellationToken? cancellationToken,
   }) {
     final ctx = target is BoundResource ? target.context : defaultContext;
-    return ctx.executeCancelable(target, action, retryOn: retryOn);
+    return ctx.executeCancelable(
+      target,
+      action,
+      retryOn: retryOn,
+      timeout: timeout,
+      cancellationToken: cancellationToken,
+    );
   }
 
   /// **Internal use only.**
@@ -1455,6 +1496,9 @@ final class ResilienceContext {
             : 'open';
         throw CircuitBreakerOpenException(
           'Circuit breaker is $stateStr for ${current.name}',
+          resourceName: current.name,
+          resetTimeout: current.config.circuitBreaker.resetTimeout,
+          state: s.circuitState,
         );
       }
       current = current.parent;
@@ -1494,7 +1538,12 @@ final class ResilienceContext {
     }
 
     if (!allowed) {
-      throw CircuitBreakerOpenException(blockedReason!);
+      throw CircuitBreakerOpenException(
+        blockedReason!,
+        resourceName: resource.name,
+        resetTimeout: resource.config.circuitBreaker.resetTimeout,
+        state: _getState(resource).circuitState,
+      );
     }
 
     // Commit transitions
@@ -1564,8 +1613,14 @@ final class ResilienceContext {
     ResilienceTarget target,
     Future<T> Function() action, {
     bool Function(Object)? retryOn,
+    Duration? timeout,
   }) {
-    return executeCancelable(target, (_) => action(), retryOn: retryOn);
+    return executeCancelable(
+      target,
+      (_) => action(),
+      retryOn: retryOn,
+      timeout: timeout,
+    );
   }
 
   /// Executes an operation with the configured resilience policies.
@@ -1585,6 +1640,11 @@ final class ResilienceContext {
   /// ([OperationCancelledException], [CircuitBreakerOpenException], and
   /// [ResilienceTimeoutException]) are not retried.
   ///
+  /// The [timeout] parameter allows overriding the timeout for this specific execution.
+  /// If omitted, [target.timeoutOverride] is checked, falling back to [resource.config.timeout].
+  ///
+  /// The [cancellationToken] parameter allows passing an explicit token to cancel this call.
+  ///
   /// Throws [ThrottledException] if the request is rejected by adaptive throttling.
   /// Throws [CircuitBreakerOpenException] if the circuit breaker is open.
   /// Throws [ResilienceTimeoutException] if the operation times out.
@@ -1593,11 +1653,15 @@ final class ResilienceContext {
     ResilienceTarget target,
     Future<T> Function(Completer<void> cancelCompleter) action, {
     bool Function(Object)? retryOn,
+    Duration? timeout,
+    CancellationToken? cancellationToken,
   }) async {
     final resource = target.resource;
     final state = _getState(resource);
 
-    // Fallback chain for configs: Target Override -> Resource Config -> Default
+    // Fallback chain for configs: Call Override -> Target Override -> Resource Config -> Default
+    final effectiveTimeout =
+        timeout ?? target.timeoutOverride ?? resource.config.timeout;
     final hedgingConfig = target.hedgingOverride ?? resource.config.hedging;
     final retryConfig = target.retryOverride ?? resource.config.retry;
 
@@ -1607,18 +1671,27 @@ final class ResilienceContext {
       throttling: resource.config.throttling,
       retry: retryConfig,
       hedging: hedgingConfig,
-      timeout: resource.config.timeout,
+      timeout: effectiveTimeout,
       failureClassifier: resource.config.failureClassifier,
     );
 
     final parentToken = ResilienceContext.currentCancellationToken;
     if (parentToken != null && parentToken.isCancelled) {
-      throw const OperationCancelledException();
+      throw OperationCancelledException('Operation was cancelled', parentToken);
+    }
+    if (cancellationToken != null && cancellationToken.isCancelled) {
+      throw OperationCancelledException(
+        'Operation was cancelled',
+        cancellationToken,
+      );
     }
 
     final executionToken = CancellationToken();
     if (parentToken != null) {
       executionToken.attach(parentToken);
+    }
+    if (cancellationToken != null) {
+      executionToken.attach(cancellationToken);
     }
 
     final statesToRecord = <ResourceState>{};
@@ -1657,7 +1730,12 @@ final class ResilienceContext {
             rejectionProbability: prob,
           ),
         );
-        throw ThrottledException('Request throttled for ${resource.name}');
+        throw ThrottledException(
+          'Request throttled for ${resource.name}',
+          resourceName: resource.name,
+          criticality: target.criticality,
+          rejectionProbability: prob,
+        );
       }
 
       // --- Deadline Setup ---
@@ -1673,7 +1751,11 @@ final class ResilienceContext {
 
       // Check if deadline is already exceeded
       if (effectiveDeadline != null && clock.now().isAfter(effectiveDeadline)) {
-        throw ResilienceTimeoutException('Deadline exceeded before execution');
+        throw ResilienceTimeoutException(
+          'Deadline exceeded before execution',
+          timeout: execConfig.timeout,
+          elapsed: stopwatch.elapsed,
+        );
       }
 
       // 3. Commit Circuit Breaker Transitions
@@ -1689,7 +1771,12 @@ final class ResilienceContext {
         executionToken.onCancelled
             .then((_) {
               if (!topLevelCancel.isCompleted) {
-                topLevelCancel.complete(const OperationCancelledException());
+                topLevelCancel.complete(
+                  OperationCancelledException(
+                    'Operation was cancelled',
+                    executionToken,
+                  ),
+                );
               }
             })
             .catchError((_, __) {}),
@@ -1715,12 +1802,17 @@ final class ResilienceContext {
           return await runZoned(
             () async {
               if (attemptToken.isCancelled) {
-                throw const OperationCancelledException();
+                throw OperationCancelledException(
+                  'Operation was cancelled',
+                  attemptToken,
+                );
               }
               if (effectiveDeadline != null &&
                   clock.now().isAfter(effectiveDeadline)) {
                 throw ResilienceTimeoutException(
                   'Deadline exceeded during execution',
+                  timeout: execConfig.timeout,
+                  elapsed: stopwatch.elapsed,
                 );
               }
               return await action(combinedCancel);
@@ -1831,6 +1923,8 @@ final class ResilienceContext {
               topLevelCancel.complete(
                 ResilienceTimeoutException(
                   'Operation timed out (deadline exceeded)',
+                  timeout: execConfig.timeout,
+                  elapsed: stopwatch.elapsed,
                 ),
               );
             }
