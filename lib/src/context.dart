@@ -1489,7 +1489,7 @@ class ResourceState {
   set activeTrialToken(CancellationToken? token) {
     _activeTrialToken = token;
     if (token != null) {
-      trialStartTime = DateTime.now();
+      trialStartTime = clock.now();
     } else {
       trialStartTime = null;
       isExecutingTrial = false;
@@ -1502,7 +1502,7 @@ class ResourceState {
     final start = trialStartTime;
     if (start == null) return false;
     final t = timeout ?? _config.circuitBreaker.resetTimeout;
-    final now = DateTime.now();
+    final now = clock.now();
     if (now.isBefore(start)) {
       trialStartTime = now;
       return false;
@@ -1521,7 +1521,7 @@ class ResourceState {
   set trialRequestInProgress(bool value) {
     if (value) {
       _activeTrialToken ??= CancellationToken();
-      trialStartTime ??= DateTime.now();
+      trialStartTime ??= clock.now();
     } else {
       _activeTrialToken = null;
       trialStartTime = null;

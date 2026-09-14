@@ -53,7 +53,7 @@ final class CircuitBreaker {
     if (state.circuitState == CircuitState.closed) {
       allowed = true;
     } else if (state.circuitState == CircuitState.open) {
-      final now = DateTime.now();
+      final now = clock.now();
       var failureTime = state.lastFailureTime ?? state.lastStateChange;
       if (now.isBefore(failureTime)) {
         failureTime = now;
@@ -94,7 +94,7 @@ final class CircuitBreaker {
     final isRootTrial = state.circuitState == CircuitState.halfOpen;
     if (isRootTrial) {
       state.isExecutingTrial = true;
-      state.trialStartTime = DateTime.now();
+      state.trialStartTime = clock.now();
     }
 
     try {
@@ -128,7 +128,7 @@ final class CircuitBreaker {
   /// Whether the circuit breaker is open and failing fast.
   bool get isOpen {
     if (state.circuitState == CircuitState.open) {
-      final now = DateTime.now();
+      final now = clock.now();
       var failureTime = state.lastFailureTime ?? state.lastStateChange;
       if (now.isBefore(failureTime)) {
         failureTime = now;
@@ -145,7 +145,7 @@ final class CircuitBreaker {
   /// Whether the circuit breaker is half-open and testing recovery.
   bool get isHalfOpen {
     if (state.circuitState == CircuitState.open) {
-      final now = DateTime.now();
+      final now = clock.now();
       var failureTime = state.lastFailureTime ?? state.lastStateChange;
       if (now.isBefore(failureTime)) {
         failureTime = now;
@@ -208,7 +208,7 @@ final class CircuitBreaker {
   /// Returns  if the trial permit was successfully acquired,  otherwise.
   bool tryAcquireTrial() {
     final cbConfig = config.circuitBreaker;
-    final now = DateTime.now();
+    final now = clock.now();
 
     if (state.circuitState == CircuitState.open) {
       var failureTime = state.lastFailureTime ?? state.lastStateChange;
