@@ -563,11 +563,15 @@ Future<T> hedge<T>(
 
   final HedgingConfig hedgingConfig;
   if (config != null) {
-    final effectiveDelay =
-        delay != const Duration(milliseconds: 500) ? delay : config.delay;
+    final hasExplicitDelay = delay != const Duration(milliseconds: 500);
+    final effectiveDelay = hasExplicitDelay ? delay : config.delay;
     hedgingConfig = HedgingConfig(
       delay: effectiveDelay,
-      enabled: config.enabled || (config.dynamicPercentile != null || config.delay != const Duration(milliseconds: 500)),
+      enabled:
+          config.enabled ||
+          hasExplicitDelay ||
+          config.dynamicPercentile != null ||
+          config.delay != const Duration(milliseconds: 500),
       dynamicPercentile: config.dynamicPercentile,
       delayMultiplier: config.delayMultiplier,
       minDelay: config.minDelay,
