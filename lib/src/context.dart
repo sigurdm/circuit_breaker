@@ -757,6 +757,13 @@ final class HedgingConfig {
   /// Concurrency cap on the number of simultaneous active hedges per resource.
   final int maxConcurrentHedges;
 
+  /// The grace period after which a losing hedge that does not complete has its
+  /// concurrency slot reclaimed in [ResourceState.activeHedges].
+  ///
+  /// If null, defaults to [ResourceConfig.timeout] if configured, or a safety
+  /// timeout of 5 seconds.
+  final Duration? gracePeriod;
+
   /// Creates a [HedgingConfig].
   ///
   /// Throws [ArgumentError] if:
@@ -770,6 +777,7 @@ final class HedgingConfig {
   /// - [overloadPercentile] is not a finite number in `[0.0, 1.0)`
   /// - [maxOverloadTokens] is < 1.0 or not finite
   /// - [maxConcurrentHedges] is < 1
+  /// - [gracePeriod] is negative
   HedgingConfig({
     this.delay = const Duration(milliseconds: 500),
     this.enabled = false,
@@ -781,6 +789,7 @@ final class HedgingConfig {
     this.overloadPercentile = 0.95,
     this.maxOverloadTokens = 10.0,
     this.maxConcurrentHedges = 5,
+    this.gracePeriod,
   }) {
     if (delay < Duration.zero) {
       throw ArgumentError.value(delay, 'delay', 'must be >= Duration.zero');
@@ -854,6 +863,13 @@ final class HedgingConfig {
         maxConcurrentHedges,
         'maxConcurrentHedges',
         'must be >= 1',
+      );
+    }
+    if (gracePeriod != null && gracePeriod! < Duration.zero) {
+      throw ArgumentError.value(
+        gracePeriod,
+        'gracePeriod',
+        'must be >= Duration.zero',
       );
     }
   }

@@ -148,6 +148,63 @@ Future<T> executeWithHedging<T>(
   }
 
   final resultCompleter = Completer<T>();
+
+  bool hedgeSlotCompleted = false;
+  Timer? hedgeReclaimTimer;
+
+  void completeHedgeSlot() {
+    if (!hedgeSlotCompleted) {
+      hedgeSlotCompleted = true;
+      hedgeReclaimTimer?.cancel();
+      state.hedgeCompleted();
+    }
+  }
+
+  void startHedgeReclaimTimerIfNeeded() {
+    if (startedHedge && !hedgeSlotCompleted && hedgeReclaimTimer == null) {
+      final Duration graceDuration;
+      if (hedgingConfig.gracePeriod != null) {
+        graceDuration = hedgingConfig.gracePeriod!;
+      } else {
+        final deadline = ResilienceContext.currentDeadline;
+        final timeoutRemaining = config.timeout != null
+            ? config.timeout! - stopwatch.elapsed
+            : null;
+        final deadlineRemaining = deadline != null
+            ? deadline.difference(clock.now())
+            : null;
+
+        Duration? effectiveRemaining;
+        if (timeoutRemaining != null && deadlineRemaining != null) {
+          effectiveRemaining = timeoutRemaining < deadlineRemaining
+              ? timeoutRemaining
+              : deadlineRemaining;
+        } else {
+          effectiveRemaining = timeoutRemaining ?? deadlineRemaining;
+        }
+
+        if (effectiveRemaining != null) {
+          final nonNegative = effectiveRemaining > Duration.zero
+              ? effectiveRemaining
+              : Duration.zero;
+          graceDuration = nonNegative < const Duration(seconds: 5)
+              ? nonNegative
+              : const Duration(seconds: 5);
+        } else {
+          graceDuration = const Duration(seconds: 5);
+        }
+      }
+
+      if (graceDuration == Duration.zero) {
+        completeHedgeSlot();
+      } else {
+        hedgeReclaimTimer = Timer(graceDuration, () {
+          completeHedgeSlot();
+        });
+      }
+    }
+  }
+
   if (currentToken != null) {
     unawaited(
       currentToken.onCancelled
@@ -160,6 +217,7 @@ Future<T> executeWithHedging<T>(
                 const OperationCancelledException(),
               );
             }
+            startHedgeReclaimTimerIfNeeded();
           })
           .catchError((_, __) {}),
     );
@@ -194,6 +252,9 @@ Future<T> executeWithHedging<T>(
               otherCancel.complete();
             }
             resultCompleter.complete(value);
+            if (!isHedge) {
+              startHedgeReclaimTimerIfNeeded();
+            }
           }
         })
         .catchError((Object error, StackTrace stackTrace) {
@@ -207,7 +268,7 @@ Future<T> executeWithHedging<T>(
         })
         .whenComplete(() {
           if (isHedge) {
-            state.hedgeCompleted();
+            completeHedgeSlot();
           }
         });
   }
@@ -219,6 +280,7 @@ Future<T> executeWithHedging<T>(
     return await resultCompleter.future;
   } finally {
     earlyRegTimer?.cancel();
+    startHedgeReclaimTimerIfNeeded();
   }
 }
 
@@ -242,12 +304,27 @@ final class RequestHedger {
     Duration? delay,
     Duration? timeout,
     bool Function(Object)? failureClassifier,
+    Duration? gracePeriod,
     ResourceState? state,
   }) {
     final HedgingConfig hedgingConfig;
     if (config != null) {
       hedgingConfig = config.enabled
-          ? config
+          ? (gracePeriod != null
+                ? HedgingConfig(
+                    delay: config.delay,
+                    enabled: config.enabled,
+                    dynamicPercentile: config.dynamicPercentile,
+                    delayMultiplier: config.delayMultiplier,
+                    minDelay: config.minDelay,
+                    maxDelay: config.maxDelay,
+                    adaptationRate: config.adaptationRate,
+                    overloadPercentile: config.overloadPercentile,
+                    maxOverloadTokens: config.maxOverloadTokens,
+                    maxConcurrentHedges: config.maxConcurrentHedges,
+                    gracePeriod: gracePeriod,
+                  )
+                : config)
           : HedgingConfig(
               delay: config.delay,
               enabled: true,
@@ -259,11 +336,13 @@ final class RequestHedger {
               overloadPercentile: config.overloadPercentile,
               maxOverloadTokens: config.maxOverloadTokens,
               maxConcurrentHedges: config.maxConcurrentHedges,
+              gracePeriod: gracePeriod ?? config.gracePeriod,
             );
     } else {
       hedgingConfig = HedgingConfig(
         enabled: true,
         delay: delay ?? const Duration(milliseconds: 500),
+        gracePeriod: gracePeriod,
       );
     }
     final cfg = ResourceConfig(
@@ -450,6 +529,7 @@ Future<T> hedge<T>(
   Duration? timeout,
   bool Function(Object)? failureClassifier,
   HedgingConfig? config,
+  Duration? gracePeriod,
   ResilienceContext? context,
   String? resourceName,
 }) {
@@ -460,7 +540,21 @@ Future<T> hedge<T>(
   final HedgingConfig hedgingConfig;
   if (config != null) {
     hedgingConfig = config.enabled
-        ? config
+        ? (gracePeriod != null
+              ? HedgingConfig(
+                  delay: config.delay,
+                  enabled: config.enabled,
+                  dynamicPercentile: config.dynamicPercentile,
+                  delayMultiplier: config.delayMultiplier,
+                  minDelay: config.minDelay,
+                  maxDelay: config.maxDelay,
+                  adaptationRate: config.adaptationRate,
+                  overloadPercentile: config.overloadPercentile,
+                  maxOverloadTokens: config.maxOverloadTokens,
+                  maxConcurrentHedges: config.maxConcurrentHedges,
+                  gracePeriod: gracePeriod,
+                )
+              : config)
         : HedgingConfig(
             delay: config.delay,
             enabled: true,
@@ -472,6 +566,7 @@ Future<T> hedge<T>(
             overloadPercentile: config.overloadPercentile,
             maxOverloadTokens: config.maxOverloadTokens,
             maxConcurrentHedges: config.maxConcurrentHedges,
+            gracePeriod: gracePeriod ?? config.gracePeriod,
           );
   } else if (existingState != null) {
     hedgingConfig = delay != const Duration(milliseconds: 500)
@@ -487,10 +582,35 @@ Future<T> hedge<T>(
             maxOverloadTokens: existingState.config.hedging.maxOverloadTokens,
             maxConcurrentHedges:
                 existingState.config.hedging.maxConcurrentHedges,
+            gracePeriod: gracePeriod ?? existingState.config.hedging.gracePeriod,
           )
-        : existingState.config.hedging;
+        : (gracePeriod != null
+              ? HedgingConfig(
+                  delay: existingState.config.hedging.delay,
+                  enabled: existingState.config.hedging.enabled,
+                  dynamicPercentile:
+                      existingState.config.hedging.dynamicPercentile,
+                  delayMultiplier:
+                      existingState.config.hedging.delayMultiplier,
+                  minDelay: existingState.config.hedging.minDelay,
+                  maxDelay: existingState.config.hedging.maxDelay,
+                  adaptationRate:
+                      existingState.config.hedging.adaptationRate,
+                  overloadPercentile:
+                      existingState.config.hedging.overloadPercentile,
+                  maxOverloadTokens:
+                      existingState.config.hedging.maxOverloadTokens,
+                  maxConcurrentHedges:
+                      existingState.config.hedging.maxConcurrentHedges,
+                  gracePeriod: gracePeriod,
+                )
+              : existingState.config.hedging);
   } else {
-    hedgingConfig = HedgingConfig(enabled: true, delay: delay);
+    hedgingConfig = HedgingConfig(
+      enabled: true,
+      delay: delay,
+      gracePeriod: gracePeriod,
+    );
   }
 
   final ResourceConfig cfg;
