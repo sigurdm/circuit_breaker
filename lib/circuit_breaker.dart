@@ -36,7 +36,8 @@ export 'src/context.dart'
         CircuitState,
         ResourceState,
         RequestRecord,
-        RetryAttemptRecord;
+        RetryAttemptRecord,
+        defaultFailureClassifier;
 
 export 'src/cancellation.dart' show CancellationToken;
 

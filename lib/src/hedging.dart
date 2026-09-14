@@ -164,8 +164,10 @@ Future<T> executeWithHedging<T>(
     );
   }
   int failures = 0;
-  Object? lastError;
-  StackTrace? lastStackTrace;
+  Object? primaryError;
+  StackTrace? primaryStackTrace;
+  Object? hedgeError;
+  StackTrace? hedgeStackTrace;
 
   void handleResult(
     Future<T> source,
@@ -197,11 +199,18 @@ Future<T> executeWithHedging<T>(
         })
         .catchError((Object error, StackTrace stackTrace) {
           failures++;
-          lastError = error;
-          lastStackTrace = stackTrace;
+          if (isHedge) {
+            hedgeError = error;
+            hedgeStackTrace = stackTrace;
+          } else {
+            primaryError = error;
+            primaryStackTrace = stackTrace;
+          }
           if (failures == 2 && !resultCompleter.isCompleted) {
             earlyRegTimer?.cancel();
-            resultCompleter.completeError(lastError!, lastStackTrace);
+            final errorToSurface = primaryError ?? hedgeError!;
+            final stackToSurface = primaryStackTrace ?? hedgeStackTrace;
+            resultCompleter.completeError(errorToSurface, stackToSurface);
           }
         })
         .whenComplete(() {
@@ -397,9 +406,8 @@ final class RequestHedger {
         }
       },
       (error, stack) {
-        if (!executionCompleter.isCompleted) {
-          executionCompleter.completeError(error, stack);
-        }
+        // Isolate uncaught asynchronous errors in background tasks from escaping to root zone,
+        // preventing unrelated background errors from hijacking the primary execution.
       },
       zoneValues: {
         ResilienceContext.cancellationTokenZoneKey: executionToken,
