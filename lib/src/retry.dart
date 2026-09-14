@@ -415,7 +415,16 @@ Future<T> retry<T>(
     );
   }
 
-  final state = ctx.getOrCreateState(targetName, cfg);
+  final ResourceState state;
+  if (existingState != null) {
+    if (config != null) {
+      ctx.getOrCreateState(targetName, cfg);
+    }
+    state = existingState;
+    state.touch();
+  } else {
+    state = ctx.getOrCreateState(targetName, cfg);
+  }
   final effectiveRetryOn = retryOn ?? failureClassifier;
   final r = Retry(cfg, state, retryOn: effectiveRetryOn);
   return r.execute(action);

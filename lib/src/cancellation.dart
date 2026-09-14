@@ -37,10 +37,16 @@ final class CancellationToken {
     detach();
   }
 
+  /// The parent token this token is currently attached to, if any.
+  CancellationToken? get parent => _parent;
+
+  /// The number of active child tokens attached to this token.
+  int get childCount => _children.length;
+
   /// Attaches this token to a [parent] token.
   ///
   /// When [parent] is cancelled, this token will automatically be cancelled.
-  /// Throws [ArgumentError] if attaching [parent] creates a cycle in the token hierarchy.
+  /// It is an error if attaching [parent] creates a cycle in the token hierarchy.
   void attach(CancellationToken parent) {
     var ancestor = parent;
     while (true) {
