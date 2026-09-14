@@ -567,6 +567,7 @@ final class CircuitBreakerConfig {
           halfOpenSuccessThreshold ?? this.halfOpenSuccessThreshold,
     );
   }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -721,6 +722,7 @@ final class RetryConfig {
       budgetWindow: budgetWindow ?? this.budgetWindow,
     );
   }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -920,6 +922,7 @@ final class ThrottlingConfig {
       minRequests: minRequests ?? this.minRequests,
     );
   }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1130,6 +1133,7 @@ final class HedgingConfig {
       gracePeriod: gracePeriod ?? this.gracePeriod,
     );
   }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -2211,10 +2215,7 @@ base class ResourceState {
   @internal
   void refundHedgingToken() {
     final hedgingConfig = config.hedging;
-    hedgingTokens = min(
-      hedgingConfig.maxOverloadTokens,
-      hedgingTokens + 1.0,
-    );
+    hedgingTokens = min(hedgingConfig.maxOverloadTokens, hedgingTokens + 1.0);
   }
 
   /// Records a hedging latency sample to update the dynamic delay estimate.

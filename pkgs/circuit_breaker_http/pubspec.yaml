@@ -1,0 +1,24 @@
+name: circuit_breaker_http
+description: HTTP client resilience utilities, failure classification, and retry policies for package:circuit_breaker.
+version: 0.1.0
+repository: https://github.com/sigurdm/circuit_breaker/tree/main/pkgs/circuit_breaker_http
+issue_tracker: https://github.com/sigurdm/circuit_breaker/issues
+topics:
+  - resilience
+  - http
+  - circuit-breaker
+  - retry
+
+resolution: workspace
+
+environment:
+  sdk: '>=3.11.0-0 <4.0.0'
+
+dependencies:
+  circuit_breaker: any
+  http: ^1.2.0
+  meta: ^1.11.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.24.0

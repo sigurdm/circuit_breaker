@@ -154,7 +154,10 @@ def main():
         os.dup2(slave, 1)
         os.dup2(slave, 2)
         os.close(slave)
-        os.execv(dart_bin, ['dart', 'run', 'example/simulator.dart'])
+        os.execv(
+            dart_bin,
+            ['dart', 'run', 'pkgs/circuit_breaker/example/simulator.dart'],
+        )
 
     os.close(slave)
 
