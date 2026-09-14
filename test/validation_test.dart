@@ -235,13 +235,40 @@ void main() {
         expect(() => HedgingConfig(adaptationRate: -0.1), throwsArgumentError);
       });
 
-      test('overloadPercentile not in [0.0, 1.0] throws ArgumentError', () {
+      test('overloadPercentile not in [0.0, 1.0) throws ArgumentError', () {
         expect(
           () => HedgingConfig(overloadPercentile: -0.1),
           throwsArgumentError,
         );
+        expect(() => HedgingConfig(overloadPercentile: 0.95), returnsNormally);
+        expect(
+          () => HedgingConfig(overloadPercentile: 1.0),
+          throwsArgumentError,
+        );
         expect(
           () => HedgingConfig(overloadPercentile: 1.1),
+          throwsArgumentError,
+        );
+      });
+
+      test('validates delay within [minDelay, maxDelay] when dynamic', () {
+        expect(
+          () => HedgingConfig(
+            dynamicPercentile: 0.9,
+            delay: const Duration(milliseconds: 10),
+            minDelay: const Duration(milliseconds: 50),
+            maxDelay: const Duration(seconds: 2),
+          ),
+          throwsArgumentError,
+        );
+
+        expect(
+          () => HedgingConfig(
+            dynamicPercentile: 0.9,
+            delay: const Duration(seconds: 3),
+            minDelay: const Duration(milliseconds: 50),
+            maxDelay: const Duration(seconds: 2),
+          ),
           throwsArgumentError,
         );
       });
@@ -269,8 +296,10 @@ void main() {
     });
 
     group('Resource', () {
-      test('empty name throws ArgumentError', () {
+      test('empty or whitespace-only name throws ArgumentError', () {
         expect(() => Resource(''), throwsArgumentError);
+        expect(() => Resource('   '), throwsArgumentError);
+        expect(() => Resource('\t\n'), throwsArgumentError);
       });
 
       test('cycle in hierarchy (same name) throws ArgumentError', () {
@@ -280,9 +309,11 @@ void main() {
     });
 
     group('Operation', () {
-      test('empty name throws ArgumentError', () {
+      test('empty or whitespace-only name throws ArgumentError', () {
         final resource = Resource('name');
         expect(() => Operation('', resource), throwsArgumentError);
+        expect(() => Operation('   ', resource), throwsArgumentError);
+        expect(() => Operation('\t\n', resource), throwsArgumentError);
       });
     });
 

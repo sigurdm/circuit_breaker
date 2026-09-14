@@ -503,4 +503,202 @@ void main() {
       throwsA(isA<OperationCancelledException>()),
     );
   });
+
+  group('Pattern Wrapping Order', () {
+    late ResilienceContext context;
+    late Resource resource;
+    late Operation op;
+
+    setUp(() {
+      context = ResilienceContext();
+    });
+
+    test('Circuit Breaker is checked before Adaptive Throttling', () async {
+      resource = Resource(
+        'cb-vs-throttling',
+        config: ResourceConfig(
+          circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 2),
+          throttling: ThrottlingConfig(k: 1.0),
+        ),
+      );
+      op = Operation('call', resource);
+
+      await context.execute(op, () async => 'success');
+      final state = context.states[resource.name]!;
+
+      for (int i = 0; i < 10000; i++) {
+        state.requestHistory[op.criticality]!.add(
+          RequestRecord(DateTime.now(), false),
+        );
+      }
+      expect(state.requestHistory[op.criticality]!.length, 10001);
+
+      state.circuitState = CircuitState.open;
+      state.lastFailureTime = DateTime.now();
+
+      await expectLater(
+        context.execute(op, () async => 'success'),
+        throwsA(isA<CircuitBreakerOpenException>()),
+      );
+    });
+
+    test(
+      'Adaptive Throttling is bypassed when Circuit Breaker is Half-Open',
+      () async {
+        resource = Resource(
+          'half-open-bypass',
+          config: ResourceConfig(
+            circuitBreaker: CircuitBreakerConfig(
+              consecutiveFailuresThreshold: 2,
+              resetTimeout: Duration(milliseconds: 50),
+              halfOpenSuccessThreshold: 1,
+            ),
+            throttling: ThrottlingConfig(k: 1.0),
+          ),
+        );
+        op = Operation('call', resource);
+
+        await context.execute(op, () async => 'success');
+        final state = context.states[resource.name]!;
+
+        for (int i = 0; i < 10000; i++) {
+          state.requestHistory[op.criticality]!.add(
+            RequestRecord(DateTime.now(), false),
+          );
+        }
+        expect(state.requestHistory[op.criticality]!.length, 10001);
+
+        state.circuitState = CircuitState.open;
+        state.lastFailureTime = DateTime.now();
+
+        await Future.delayed(const Duration(milliseconds: 60));
+
+        final result = await context.execute(op, () async => 'recovered');
+        expect(result, 'recovered');
+        expect(state.circuitState, CircuitState.closed);
+      },
+    );
+
+    test('Adaptive Throttling is checked before Retry', () async {
+      resource = Resource(
+        'throttling-vs-retry',
+        config: ResourceConfig(
+          retry: RetryConfig(maxAttempts: 3),
+          throttling: ThrottlingConfig(k: 1.0),
+        ),
+      );
+      op = Operation('call', resource);
+
+      await context.execute(op, () async => 'success');
+      final state = context.states[resource.name]!;
+
+      for (int i = 0; i < 10000; i++) {
+        state.requestHistory[op.criticality]!.add(
+          RequestRecord(DateTime.now(), false),
+        );
+      }
+      expect(state.requestHistory[op.criticality]!.length, 10001);
+
+      int actionCalls = 0;
+      state.retryHistory.clear();
+
+      await expectLater(
+        context.execute(op, () async {
+          actionCalls++;
+          return 'success';
+        }),
+        throwsA(isA<ThrottledException>()),
+      );
+
+      expect(actionCalls, 0, reason: 'Action should not be called');
+      expect(
+        state.retryHistory,
+        isEmpty,
+        reason: 'Retry loop should not be entered',
+      );
+    });
+
+    test('Retry wraps Hedging (entire hedging session is retried)', () async {
+      resource = Resource(
+        'retry-vs-hedging',
+        config: ResourceConfig(
+          retry: RetryConfig(
+            maxAttempts: 2,
+            baseDelay: Duration(milliseconds: 100),
+            enableJitter: false,
+          ),
+          hedging: HedgingConfig(
+            enabled: true,
+            delay: Duration(milliseconds: 50),
+          ),
+        ),
+      );
+      op = Operation('call', resource);
+
+      final List<int> attemptStartTimes = [];
+      final stopwatch = Stopwatch()..start();
+
+      final execution = context.executeCancelable(op, (cancel) async {
+        attemptStartTimes.add(stopwatch.elapsedMilliseconds);
+        await Future.delayed(const Duration(milliseconds: 80));
+        throw Exception('fail');
+      });
+
+      await expectLater(execution, throwsA(anything));
+
+      expect(
+        attemptStartTimes.length,
+        4,
+        reason: 'Should have 2 primary attempts and 2 hedge attempts',
+      );
+
+      const int tolerance = 40;
+      expect(attemptStartTimes[0], lessThan(tolerance));
+      expect(
+        attemptStartTimes[1],
+        allOf(greaterThanOrEqualTo(50 - tolerance), lessThan(50 + tolerance)),
+      );
+      expect(
+        attemptStartTimes[2],
+        allOf(greaterThanOrEqualTo(230 - tolerance), lessThan(230 + tolerance)),
+      );
+      expect(
+        attemptStartTimes[3],
+        allOf(greaterThanOrEqualTo(280 - tolerance), lessThan(280 + tolerance)),
+      );
+    });
+
+    test(
+      'Retry respects Circuit Breaker tripping (does not retry if CB trips mid-retry)',
+      () async {
+        resource = Resource(
+          'retry-vs-cb-trip',
+          config: ResourceConfig(
+            circuitBreaker: CircuitBreakerConfig(
+              consecutiveFailuresThreshold: 2,
+            ),
+            retry: RetryConfig(
+              maxAttempts: 4,
+              baseDelay: const Duration(milliseconds: 1),
+              enableJitter: false,
+            ),
+            throttling: ThrottlingConfig(k: 100.0),
+          ),
+        );
+        op = Operation('call', resource);
+
+        int actionCalls = 0;
+
+        await expectLater(
+          context.execute(op, () async {
+            actionCalls++;
+            throw Exception('fail');
+          }),
+          throwsA(isA<CircuitBreakerOpenException>()),
+        );
+
+        expect(actionCalls, equals(2));
+      },
+    );
+  });
 }
