@@ -9,6 +9,7 @@ import 'throttling.dart';
 import 'exceptions.dart';
 import 'cancellation.dart';
 import 'events.dart';
+import 'counter.dart';
 
 /// Configuration for a specific resource's resilience policies.
 ///
@@ -1586,7 +1587,7 @@ final class ResilienceContext {
 
 /// Holds the runtime state for a resource.
 /// This is internal state used by the resilience patterns.
-class ResourceState {
+base class ResourceState {
   /// The active configuration for the resource.
   ResourceConfig _config;
 
@@ -1597,6 +1598,15 @@ class ResourceState {
   set config(ResourceConfig newConfig) {
     _config = newConfig;
     hedgingTokens = hedgingTokens.clamp(0.0, _config.hedging.maxOverloadTokens);
+    if (throttlingCounter.windowDuration !=
+        newConfig.throttling.windowDuration) {
+      throttlingCounter.updateWindowDuration(
+        newConfig.throttling.windowDuration,
+      );
+    }
+    if (retryCounter.budgetWindow != newConfig.retry.budgetWindow) {
+      retryCounter.updateBudgetWindow(newConfig.retry.budgetWindow);
+    }
   }
 
   /// The number of consecutive failures for the resource.
@@ -1692,20 +1702,21 @@ class ResourceState {
     }
   }
 
+  /// The bucketed ring counter for adaptive throttling metrics.
+  late final BucketedThrottlingCounter throttlingCounter;
+
+  /// The bucketed ring counter for retry budget metrics.
+  late final BucketedRetryCounter retryCounter;
+
   /// The history of requests, isolated by criticality.
   ///
-  /// Should only be mutated by the library.
-  final Map<Criticality, List<RequestRecord>> requestHistory = {
-    Criticality.criticalPlus: [],
-    Criticality.critical: [],
-    Criticality.sheddablePlus: [],
-    Criticality.sheddable: [],
-  };
+  /// Backed by an O(1) [BucketedThrottlingCounter].
+  late final Map<Criticality, RequestHistoryList> requestHistory;
 
   /// The history of retry attempts.
   ///
-  /// Should only be mutated by the library.
-  final List<RetryAttemptRecord> retryHistory = [];
+  /// Backed by an O(1) [BucketedRetryCounter].
+  late final RetryHistoryList retryHistory;
 
   /// Current tokens in the hedging token bucket.
   ///
@@ -1736,6 +1747,17 @@ class ResourceState {
   /// Creates a [ResourceState] with the initial configuration.
   ResourceState(this._config) {
     hedgingTokens = _config.hedging.maxOverloadTokens;
+    throttlingCounter = BucketedThrottlingCounter(
+      windowDuration: _config.throttling.windowDuration,
+    );
+    retryCounter = BucketedRetryCounter(
+      budgetWindow: _config.retry.budgetWindow,
+    );
+    requestHistory = {
+      for (final c in Criticality.values)
+        c: RequestHistoryList(criticality: c, counter: throttlingCounter),
+    };
+    retryHistory = RetryHistoryList(counter: retryCounter);
   }
 
   /// Refills the hedging token bucket based on a new logical request.
@@ -1815,81 +1837,51 @@ class ResourceState {
   /// **Internal use only.**
   @internal
   void cleanHistory(DateTime now) {
+    throttlingCounter.clean(now);
+    retryCounter.clean(now);
+
     final cutoff = now.subtract(config.throttling.windowDuration);
     for (final history in requestHistory.values) {
-      if (history.isEmpty) continue;
-      history.removeWhere(
-        (record) =>
-            record.timestamp.isBefore(cutoff) || record.timestamp.isAfter(now),
-      );
+      history.pruneExpired(cutoff: cutoff, maxTime: now);
     }
 
     final retryCutoff = now.subtract(config.retry.budgetWindow);
-    if (retryHistory.isNotEmpty) {
-      retryHistory.removeWhere(
-        (record) =>
-            record.timestamp.isBefore(retryCutoff) ||
-            record.timestamp.isAfter(now),
-      );
-    }
+    retryHistory.pruneExpired(cutoff: retryCutoff, maxTime: now);
   }
 
-  /// Returns the number of requests in the retry budget window.
+  /// Returns the number of requests in the retry budget window in O(1) time.
   int getRetryBudgetRequests() {
-    cleanHistory(clock.now());
-    return retryHistory.length;
+    return retryCounter.getRequests(clock.now());
   }
 
-  /// Returns the number of retries in the retry budget window.
+  /// Returns the number of retries in the retry budget window in O(1) time.
   int getRetryBudgetRetries() {
-    cleanHistory(clock.now());
-    return retryHistory.where((r) => r.isRetry).length;
+    return retryCounter.getRetries(clock.now());
   }
 
-  /// Returns the ratio of retries to total requests in the retry budget window.
+  /// Returns the ratio of retries to total requests in the retry budget window in O(1) time.
   double getRetryBudgetRatio() {
-    cleanHistory(clock.now());
-    final requests = retryHistory.length;
-    if (requests == 0) return 0.0;
-    int retries = 0;
-    for (final r in retryHistory) {
-      if (r.isRetry) retries++;
-    }
-    return retries / requests;
+    return retryCounter.getRatio(clock.now());
   }
 
-  /// Returns the number of request records for that criticality in the throttling window.
+  /// Returns the number of request records for that criticality in the throttling window in O(1) time.
   int getThrottlingRequests(Criticality criticality) {
-    cleanHistory(clock.now());
-    return requestHistory[criticality]?.length ?? 0;
+    return throttlingCounter.getRequests(criticality, clock.now());
   }
 
-  /// Returns the number of accepted request records for that criticality in the throttling window.
+  /// Returns the number of accepted request records for that criticality in the throttling window in O(1) time.
   int getThrottlingAccepts(Criticality criticality) {
-    cleanHistory(clock.now());
-    return requestHistory[criticality]?.where((r) => r.accepted).length ?? 0;
+    return throttlingCounter.getAccepts(criticality, clock.now());
   }
 
-  /// Returns the total number of request records across all criticalities in the throttling window.
+  /// Returns the total number of request records across all criticalities in the throttling window in O(1) time.
   int get totalThrottlingRequests {
-    cleanHistory(clock.now());
-    int total = 0;
-    for (final list in requestHistory.values) {
-      total += list.length;
-    }
-    return total;
+    return throttlingCounter.getTotalRequests(clock.now());
   }
 
-  /// Returns the total number of accepted request records across all criticalities in the throttling window.
+  /// Returns the total number of accepted request records across all criticalities in the throttling window in O(1) time.
   int get totalThrottlingAccepts {
-    cleanHistory(clock.now());
-    int total = 0;
-    for (final list in requestHistory.values) {
-      for (final r in list) {
-        if (r.accepted) total++;
-      }
-    }
-    return total;
+    return throttlingCounter.getTotalAccepts(clock.now());
   }
 
   /// Returns the calculated rejection probability for [criticality] based on overall resource health.
@@ -1900,16 +1892,12 @@ class ResourceState {
   ///
   /// Returns `0.0` if total requests across all criticalities are below [ThrottlingConfig.minRequests]
   /// or if there are no requests.
+  ///
+  /// Evaluated in O(1) time using the internal bucketed ring counter.
   double getThrottlingRejectionProbability(Criticality criticality) {
-    cleanHistory(clock.now());
-    int totalRequests = 0;
-    int totalAccepts = 0;
-    for (final list in requestHistory.values) {
-      totalRequests += list.length;
-      for (final r in list) {
-        if (r.accepted) totalAccepts++;
-      }
-    }
+    final now = clock.now();
+    final totalRequests = throttlingCounter.getTotalRequests(now);
+    final totalAccepts = throttlingCounter.getTotalAccepts(now);
     if (totalRequests < config.throttling.minRequests || totalRequests == 0) {
       return 0.0;
     }

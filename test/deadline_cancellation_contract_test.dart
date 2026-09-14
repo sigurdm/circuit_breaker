@@ -590,7 +590,7 @@ void main() {
   });
 }
 
-class DelayingResourceState extends ResourceState {
+final class DelayingResourceState extends ResourceState {
   DelayingResourceState(super.config);
 
   @override
