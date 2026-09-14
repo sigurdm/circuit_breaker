@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 import 'dart:math';
 import 'package:meta/meta.dart';
 import 'circuit_breaker.dart';
@@ -1014,7 +1015,7 @@ final class ResilienceContext {
       return _CheckResult.allowedClosed;
     }
     if (state.circuitState == CircuitState.open) {
-      final now = DateTime.now();
+      final now = clock.now();
       var failureTime = state.lastFailureTime ?? state.lastStateChange;
       if (now.isBefore(failureTime)) {
         failureTime = now;
@@ -1245,7 +1246,7 @@ final class ResilienceContext {
       // --- Deadline Setup ---
       final parentDeadline = ResilienceContext.currentDeadline;
       final DateTime? localDeadline = execConfig.timeout != null
-          ? DateTime.now().add(execConfig.timeout!)
+          ? clock.now().add(execConfig.timeout!)
           : null;
 
       final DateTime? effectiveDeadline = _mergeDeadlines(
@@ -1254,8 +1255,7 @@ final class ResilienceContext {
       );
 
       // Check if deadline is already exceeded
-      if (effectiveDeadline != null &&
-          DateTime.now().isAfter(effectiveDeadline)) {
+      if (effectiveDeadline != null && clock.now().isAfter(effectiveDeadline)) {
         throw ResilienceTimeoutException('Deadline exceeded before execution');
       }
 
@@ -1301,7 +1301,7 @@ final class ResilienceContext {
                 throw const OperationCancelledException();
               }
               if (effectiveDeadline != null &&
-                  DateTime.now().isAfter(effectiveDeadline)) {
+                  clock.now().isAfter(effectiveDeadline)) {
                 throw ResilienceTimeoutException(
                   'Deadline exceeded during execution',
                 );
@@ -1401,7 +1401,7 @@ final class ResilienceContext {
       executionFuture.ignore();
 
       if (effectiveDeadline != null) {
-        final remaining = effectiveDeadline.difference(DateTime.now());
+        final remaining = effectiveDeadline.difference(clock.now());
         timeoutTimer = Timer(
           remaining > Duration.zero ? remaining : Duration.zero,
           () {
@@ -1498,7 +1498,7 @@ class ResourceState {
   CircuitState _circuitState = CircuitState.closed;
 
   /// The timestamp of the last circuit state change.
-  DateTime lastStateChange = DateTime.now();
+  DateTime lastStateChange = clock.now();
 
   /// The current state of the circuit breaker.
   ///
@@ -1507,7 +1507,7 @@ class ResourceState {
   set circuitState(CircuitState newState) {
     if (_circuitState != newState) {
       _circuitState = newState;
-      lastStateChange = DateTime.now();
+      lastStateChange = clock.now();
     }
   }
 
@@ -1626,7 +1626,7 @@ class ResourceState {
   /// **Internal use only.**
   @internal
   void recordRequest(bool accepted, Criticality criticality) {
-    requestHistory[criticality]!.add(RequestRecord(DateTime.now(), accepted));
+    requestHistory[criticality]!.add(RequestRecord(clock.now(), accepted));
   }
 
   /// Cleans up history records that are older than the configured windows.
@@ -1655,19 +1655,19 @@ class ResourceState {
 
   /// Returns the number of requests in the retry budget window.
   int getRetryBudgetRequests() {
-    cleanHistory(DateTime.now());
+    cleanHistory(clock.now());
     return retryHistory.length;
   }
 
   /// Returns the number of retries in the retry budget window.
   int getRetryBudgetRetries() {
-    cleanHistory(DateTime.now());
+    cleanHistory(clock.now());
     return retryHistory.where((r) => r.isRetry).length;
   }
 
   /// Returns the ratio of retries to total requests in the retry budget window.
   double getRetryBudgetRatio() {
-    cleanHistory(DateTime.now());
+    cleanHistory(clock.now());
     final requests = retryHistory.length;
     if (requests == 0) return 0.0;
     int retries = 0;
@@ -1679,19 +1679,19 @@ class ResourceState {
 
   /// Returns the number of request records for that criticality in the throttling window.
   int getThrottlingRequests(Criticality criticality) {
-    cleanHistory(DateTime.now());
+    cleanHistory(clock.now());
     return requestHistory[criticality]?.length ?? 0;
   }
 
   /// Returns the number of accepted request records for that criticality in the throttling window.
   int getThrottlingAccepts(Criticality criticality) {
-    cleanHistory(DateTime.now());
+    cleanHistory(clock.now());
     return requestHistory[criticality]?.where((r) => r.accepted).length ?? 0;
   }
 
   /// Returns the calculated rejection probability for that criticality.
   double getThrottlingRejectionProbability(Criticality criticality) {
-    cleanHistory(DateTime.now());
+    cleanHistory(clock.now());
     final list = requestHistory[criticality];
     final requests = list?.length ?? 0;
     if (requests < config.throttling.minRequests || requests == 0) return 0.0;

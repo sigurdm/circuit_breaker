@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 
 import 'context.dart';
 import 'exceptions.dart';
@@ -107,7 +108,7 @@ final class CircuitBreaker {
     }
 
     if (state.circuitState == CircuitState.open) {
-      final now = DateTime.now();
+      final now = clock.now();
       var failureTime = state.lastFailureTime ?? state.lastStateChange;
       if (now.isBefore(failureTime)) {
         failureTime = now;
@@ -153,7 +154,7 @@ final class CircuitBreaker {
   /// Records a failed operation.
   void recordFailure() {
     state.failureCount++;
-    state.lastFailureTime = DateTime.now();
+    state.lastFailureTime = clock.now();
 
     final cbConfig = config.circuitBreaker;
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 import 'dart:math';
 import 'context.dart';
 import 'cancellation.dart';
@@ -23,16 +24,16 @@ Future<T> executeWithRetry<T>(
     }
 
     final initialDeadline = ResilienceContext.currentDeadline;
-    if (initialDeadline != null && DateTime.now().isAfter(initialDeadline)) {
+    if (initialDeadline != null && clock.now().isAfter(initialDeadline)) {
       throw ResilienceTimeoutException('Deadline exceeded before attempt');
     }
 
     try {
       attempts++;
       state.retryHistory.add(
-        RetryAttemptRecord(DateTime.now(), isRetry: attempts > 1),
+        RetryAttemptRecord(clock.now(), isRetry: attempts > 1),
       );
-      state.cleanHistory(DateTime.now());
+      state.cleanHistory(clock.now());
       return await operation();
     } catch (e) {
       if (attempts >= retryConfig.maxAttempts) {
@@ -63,7 +64,7 @@ Future<T> executeWithRetry<T>(
 
       // Check if deadline is already exceeded
       final currentDeadline = ResilienceContext.currentDeadline;
-      if (currentDeadline != null && DateTime.now().isAfter(currentDeadline)) {
+      if (currentDeadline != null && clock.now().isAfter(currentDeadline)) {
         throw ResilienceTimeoutException(
           'Deadline exceeded before retry attempt',
         );
@@ -200,7 +201,7 @@ final class Retry {
 
     final parentDeadline = ResilienceContext.currentDeadline;
     final localDeadline = config.timeout != null
-        ? DateTime.now().add(config.timeout!)
+        ? clock.now().add(config.timeout!)
         : null;
     final effectiveDeadline = parentDeadline == null
         ? localDeadline
@@ -210,8 +211,7 @@ final class Retry {
                     ? parentDeadline
                     : localDeadline));
 
-    if (effectiveDeadline != null &&
-        DateTime.now().isAfter(effectiveDeadline)) {
+    if (effectiveDeadline != null && clock.now().isAfter(effectiveDeadline)) {
       throw ResilienceTimeoutException('Deadline exceeded before execution');
     }
 
@@ -233,7 +233,7 @@ final class Retry {
 
     Timer? timeoutTimer;
     if (effectiveDeadline != null) {
-      final remaining = effectiveDeadline.difference(DateTime.now());
+      final remaining = effectiveDeadline.difference(clock.now());
       timeoutTimer = Timer(
         remaining > Duration.zero ? remaining : Duration.zero,
         () {

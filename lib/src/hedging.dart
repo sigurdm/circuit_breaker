@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 import 'dart:math';
 import 'context.dart';
 import 'exceptions.dart';
@@ -288,7 +289,7 @@ final class RequestHedger {
 
     final parentDeadline = ResilienceContext.currentDeadline;
     final localDeadline = config.timeout != null
-        ? DateTime.now().add(config.timeout!)
+        ? clock.now().add(config.timeout!)
         : null;
     final effectiveDeadline = parentDeadline == null
         ? localDeadline
@@ -298,8 +299,7 @@ final class RequestHedger {
                     ? parentDeadline
                     : localDeadline));
 
-    if (effectiveDeadline != null &&
-        DateTime.now().isAfter(effectiveDeadline)) {
+    if (effectiveDeadline != null && clock.now().isAfter(effectiveDeadline)) {
       throw ResilienceTimeoutException('Deadline exceeded before execution');
     }
 
@@ -321,7 +321,7 @@ final class RequestHedger {
 
     Timer? timeoutTimer;
     if (effectiveDeadline != null) {
-      final remaining = effectiveDeadline.difference(DateTime.now());
+      final remaining = effectiveDeadline.difference(clock.now());
       timeoutTimer = Timer(
         remaining > Duration.zero ? remaining : Duration.zero,
         () {
@@ -361,7 +361,7 @@ final class RequestHedger {
               throw const OperationCancelledException();
             }
             if (effectiveDeadline != null &&
-                DateTime.now().isAfter(effectiveDeadline)) {
+                clock.now().isAfter(effectiveDeadline)) {
               throw ResilienceTimeoutException(
                 'Deadline exceeded during execution',
               );
