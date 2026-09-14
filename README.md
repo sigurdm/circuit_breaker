@@ -1,431 +1,395 @@
 # Circuit Breaker & Resilience Patterns for Dart
 
-A resilience library for Dart applications implementing patterns for distributed systems, inspired by the Google SRE book and release engineering practices.
+A production-grade resilience engineering library for Dart backend services and Flutter applications. Implements battle-tested distributed systems patterns inspired by the Google SRE book and *The Tail at Scale*: circuit breaking, adaptive throttling, speculative request hedging, retry budgets with full jitter, deadline propagation, and criticality load shedding.
 
-## Features
+---
 
-*   **Circuit Breaking**: Fast-fail requests when error thresholds are exceeded to protect failing dependencies.
-*   **Adaptive Throttling**: Client-side throttling to protect backends from overload (Google SRE book, Chapter 21).
-*   **Request Hedging**: Speculative parallel requests to mitigate tail latency (The Tail at Scale).
-*   **Retry Budgets**: Rolling window budget to prevent client-induced retry storms.
-*   **Deadline & Cancellation Propagation**: Context-aware timeout and cancellation sharing across call chains to prevent zombie requests.
-*   **Failure Classification**: Distinguish application-level errors from system failures.
-*   **Hierarchical Configuration**: Share state across resources while overriding settings for specific operations.
-*   **Criticality Awareness**: Prioritize traffic and throttle less critical requests first.
+## Quick Positioning: Server vs. Client / Flutter
 
-## Interactive Simulator
+Resilience is not one-size-fits-all. A Flutter mobile application experiencing sporadic mobile connectivity with low request volume requires fundamentally different resilience strategies than a high-throughput Dart backend service coordinating hundreds of microservice RPCs per second.
 
-The repository includes an interactive terminal dashboard simulator that lets you visualize and experiment with these resilience patterns under backend overload, slowness, and failures in real-time.
+### Architectural Matrix: When to Use What
 
-```bash
-dart run example/simulator.dart
-```
+| Pattern | High-Throughput Server RPCs | Flutter & Client Apps | Operational Rationale |
+| :--- | :--- | :--- | :--- |
+| **Circuit Breaker** | **Essential** | **Essential** | Fails fast to protect downstream services from cascading failure on the backend; prevents radio/battery drain and provides immediate offline/degraded UX on mobile. |
+| **Exponential Retry + Jitter** | **Essential (with Budget)** | **Essential (Bounded)** | Smooths out transient hiccups. Backends **must** enforce a Retry Budget to prevent retry storms; clients benefit from full jitter to desynchronize retries. |
+| **Adaptive Throttling** | **Essential** | **Not Recommended** | Relies on high QPS over a rolling time window to statistically compute backend rejection rates ($P_{\text{throttle}}$). Client traffic is too sparse and bursty for statistical accuracy. |
+| **Criticality Shedding** | **Essential** | **Rarely Needed** | Backends shed batch and background traffic (`sheddable`) first to protect revenue-critical endpoints (`criticalPlus`). Client requests are almost always user-facing. |
+| **Request Hedging** | **Dynamic (Adaptive)** | **Static (Fixed Delay)** | Backends run continuous stochastic percentile tracking (P95) with token buckets; clients lack continuous traffic to warm the tracker and should use a simple, deterministic static delay (e.g. 150ms). |
+| **Deadline & Cancellation** | **Essential** | **Essential** | Servers propagate timeouts across multi-tier microservices to kill zombie requests; Flutter cancels downstream network calls when a widget is disposed or navigation pops. |
+| **Hierarchical Resources** | **Recommended** | **Optional / Flat** | Models microservices, database clusters, and sub-endpoints with cascading parent-child health states and deadlock-free trial requests. |
 
-For more details on the simulator controls and scenarios, see the [Simulator README](https://github.com/sigurdm/circuit_breaker/blob/main/example/README.md).
+---
 
-## Core Concepts
+## Progressive Adoption Model
 
-### Adaptive Throttling (Retry Storm Prevention)
+The library is designed for progressive adoption across four layers, from a zero-setup one-liner to an enterprise service mesh topology.
 
-When a backend is overloaded, client retries can exacerbate the issue (retry storms). Adaptive throttling client-side calculates a rejection probability based on the ratio of accepted requests to total requests:
-
-```
-P_throttle = max(0, (requests - K × accepts) / (requests + 1))
-```
-
-Where `K` is the acceptance multiplier (e.g., `2.0`). If `K = 2`, the client will allow at most twice as many requests as the backend is successfully accepting. Excess requests are rejected locally with a `ThrottledException`.
-
-### Circuit Breaking (Failing Fast)
-
-Avoids wasting resources on a dependency that is down. Using the electrical analogy, a **closed** circuit allows traffic to flow, while an **open** circuit breaks the path, blocking all requests.
-
-The circuit breaker transitions through three states:
-*   **Closed**: Normal operation. Requests are allowed to pass through to the backend.
-*   **Open**: The backend is failing. Requests are blocked and fail immediately with `CircuitBreakerOpenException`.
-*   **Half-Open**: The reset timeout has expired. The client admits trial requests (one at a time) to test if the backend has recovered, transitioning back to Closed once `halfOpenSuccessThreshold` consecutive successes are recorded (default: 3).
-
-### Throttling vs. Circuit Breaking: Why Use Both?
-
-While both patterns protect services from degradation, they operate at different ends of the connection and handle different failure modes:
-
-*   **Throttling (Rate Limiting)** is a **proactive, server-side** defense. It protects the *provider* from being overwhelmed by too many requests (accidental spikes or abusive clients) by rejecting excess traffic early.
-*   **Circuit Breaking** is a **reactive, client-side** defense. It protects the *consumer* from wasting resources on a downstream service that is failing (due to database issues, network partitions, bugs, or even server-side throttling), preventing cascading failures.
-
-Using throttling alone is not enough: if a downstream service is down (not just overloaded), throttling on that service cannot protect the client from hanging on timeouts. Conversely, using circuit breakers alone is not enough: a sudden massive spike in traffic can crash a server before client circuit breakers detect the failures. They are complementary patterns that work together to ensure end-to-end resilience.
-
-### Request Hedging (Tail Latency Mitigation)
-
-Speculatively sends a second, parallel request if the first request does not complete within a configured delay. 
-If a service has a 5% chance of taking >1s, hedging after 1s reduces the probability of both requests taking >1s to `0.05 × 0.05 = 0.25%`, significantly reducing tail latency at the cost of at most 5% extra traffic.
-
-The library supports two modes of hedging:
-*   **Static Hedging**: Uses a fixed pre-configured delay.
-*   **Dynamic (Adaptive) Hedging**: Automatically estimates the target percentile latency (e.g., P95) at runtime using a memory-efficient stochastic tracker (Robbins-Monro algorithm) and adjusts the hedging delay dynamically. It includes overload protection (token bucket) to limit the percentage of traffic hedged, and concurrency limits to avoid thundering herds.
-
-> [!IMPORTANT]
-> Only use hedging for **idempotent** operations (like reads) as it causes operations to be executed multiple times.
-
-### Deadline & Cancellation Propagation (Zombie Request Prevention)
-
-In distributed systems, a request often traverses a chain of services (A -> B -> C). If a client cancels the request or a timeout is reached early in the chain, downstream services might continue expending resources on work that has already been abandoned. These are known as "zombie requests."
-
-To address this, the library supports **Deadline** and **Cancellation Propagation** via Dart `Zone`s:
-*   **Deadline Propagation**: Passes the absolute point in time by which a request must complete downstream. If a child operation is started, it automatically inherits the parent's deadline (choosing the earliest of parent vs. child timeout). If the deadline is reached, the operation fails fast with a `ResilienceTimeoutException`.
-*   **Cancellation Propagation**: Propagates cancellation signals downstream. If a parent operation is cancelled (e.g. by the client or because a faster hedge completed), all active downstream operations in the same zone are notified via a `CancellationToken` and aborted with an `OperationCancelledException`.
-
-## Resource and Context Model
-
-The library models your system's dependencies using three core concepts:
-
-*   **`ResilienceContext`**: The **runtime state container**. It maintains the active state of your resilience patterns (e.g., circuit breaker status, rolling request history for throttling) for all resources. You should typically create a single, application-wide `ResilienceContext` to ensure metrics are accumulated globally.
-*   **`Resource`**: A logical **target service** or dependency (e.g., `'database'` or `'auth-service'`). It defines the identity (name) and default policies (`ResourceConfig`) for that target. Runtime state is keyed by the resource name, meaning all operations targeting the same resource share its circuit breaker and throttling metrics.
-*   **`Operation`**: A specific **action** performed on a resource (e.g., `'getUser'` or `'updateAvatar'`). Operations inherit their resource's configuration but can override settings (like enabling hedging for reads but disabling it for writes). Operations also define the `Criticality` of the call.
-
-This separation ensures that health metrics are aggregated at the service level (Resource) while allowing fine-grained policy tuning at the call level (Operation).
-
-### Hierarchical Resources (Nested Circuit Breakers)
-
-The library supports **nested circuit breakers** by allowing you to define a parent-child hierarchy for `Resource`s. This is useful when you have fine-grained resources that depend on a larger parent resource (e.g., individual API endpoints `/users/1` and `/users/2` depending on the parent `/users` API, or multiple services depending on a shared database).
-
-*   **Parent-to-Child Propagation**: If a parent circuit breaker trips to `OPEN`, all operations on child resources are automatically blocked (failing fast with `CircuitBreakerOpenException` mentioning the parent resource).
-*   **Selectivity (No Child-to-Parent Propagation)**: Failures on child resources *do not* propagate up to the parent. A single failing child resource (e.g., a specific broken endpoint) will trip its own circuit breaker, but other children of the same parent can continue to function.
-*   **Deadlock Avoidance & Recovery**: When a parent circuit breaker is open, children are blocked. Once the parent's reset timeout expires, child requests are allowed to proceed to act as **trial requests** for the parent. Success or failure of these child requests will propagate up to recover or re-open the parent circuit breaker.
-
-To define a hierarchy, pass the `parent` resource to the `Resource` constructor:
-
-```dart
-final parent = Resource('parent-service');
-final child = Resource('child-service', parent: parent);
-```
-
-## Usage & Progressive Adoption
-
-The package is designed to be adapted piecewise. You can start with a simple one-liner and progressively add patterns as your application grows, with zero wasted boilerplate.
-
-### 1. Zero Boilerplate: Ad-hoc `retry(...)`
-
-For simple operations where you just need exponential backoff and jitter without managing state or circuit breakers:
+### Level 1: Zero Boilerplate (Ad-hoc Functions)
+For simple calls where you just need exponential backoff or speculative hedging without managing state or circuit breakers:
 
 ```dart
 import 'package:circuit_breaker/circuit_breaker.dart';
 
-final data = await retry(
-  () => fetchUserProfile(userId),
+// Automatic exponential backoff with full jitter and timeout
+final user = await retry(
+  () => httpClient.get('/users/42'),
   maxAttempts: 3,
+  baseDelay: const Duration(milliseconds: 100),
   timeout: const Duration(seconds: 5),
+);
+
+// Speculative hedging for latency-critical reads (idempotent operations only)
+final suggestions = await hedge(
+  () => searchIndex(query),
+  delay: const Duration(milliseconds: 150),
 );
 ```
 
-### 2. Standalone Primitives
-
-Each resilience pattern can be used as an independent, standalone object:
+### Level 2: Standalone Primitives
+Use individual patterns as isolated, stateful objects with zero framework overhead:
 
 ```dart
 // Standalone Circuit Breaker
 final cb = CircuitBreaker.standalone(
   config: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
 );
-final user = await cb.execute(() => fetchUser());
+final profile = await cb.execute(() => fetchProfile());
 
 // Standalone Retry with budget tracking
 final retrier = Retry.standalone(
   maxAttempts: 4,
-  baseDelay: const Duration(milliseconds: 200),
+  baseDelay: const Duration(milliseconds: 150),
 );
 final result = await retrier.execute(() => callExternalApi());
 
 // Standalone Request Hedger for tail latency
 final hedger = RequestHedger.standalone(
-  delay: const Duration(milliseconds: 100),
+  delay: const Duration(milliseconds: 200),
 );
 final fastResult = await hedger.execute(() => readReplica());
 
 // Function decorators (.wrap and .wrapUnary)
-final resilientFetch = cb.wrap(fetchUser);
+final resilientFetch = cb.wrap(fetchProfile);
 final userFromId = cb.wrapUnary<User, String>((id) => fetchUserById(id));
 ```
 
-### 3. Standalone Composite Policy (`ResiliencePolicy`)
-
-Combine Circuit Breaker, Retries, Throttling, Hedging, and Timeout into a single self-contained policy without needing a context:
+### Level 3: Standalone Composite Policy (`ResiliencePolicy`)
+Bundle Circuit Breaker, Retries, Throttling, Hedging, and Timeout into a single cohesive policy object without requiring a central context. Ideal for repository classes in Flutter or client SDKs:
 
 ```dart
-final paymentPolicy = ResiliencePolicy(
-  circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 4),
+final apiPolicy = ResiliencePolicy(
+  circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
   retry: RetryConfig(maxAttempts: 3),
-  timeout: const Duration(seconds: 5),
+  timeout: const Duration(seconds: 4),
 );
 
 // Execute directly
-final confirmation = await paymentPolicy.execute(() => processPayment());
+final data = await apiPolicy.execute(() => api.loadDashboard());
 
 // Or wrap existing functions
-final decoratedPayment = paymentPolicy.wrap(processPayment);
+final decoratedFetch = apiPolicy.wrap(api.loadDashboard);
 ```
 
-### 4. Service-Oriented Context & Bound Resources
-
-When coordinating resilience across multiple services and endpoints, use `ResilienceContext`:
+### Level 4: Enterprise Service Context (`ResilienceContext`)
+For server-side microservices, multi-tier architectures, shared resource states, and distributed deadline propagation:
 
 ```dart
 final context = ResilienceContext();
 
-// Directly bind and configure a resource in one step:
-final userService = context.resource(
-  'user-service',
+// Bind and configure a resource with shared health metrics
+final paymentService = context.resource(
+  'payment-service',
   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
-  retry: RetryConfig(maxAttempts: 3),
+  retry: RetryConfig(maxAttempts: 3, retryBudgetRatio: 0.1),
+  throttling: ThrottlingConfig(k: 2.0),
   timeout: const Duration(seconds: 5),
 );
 
-// Execute directly on the resource — no Operation needed!
-final user = await userService.execute(() => fetchUser());
+// Execute directly on the bound resource
+final receipt = await paymentService.execute(() => processPayment());
 
-// Or pass a Resource directly to context.execute:
-final db = Resource('database', circuitBreaker: CircuitBreakerConfig());
-final queryResult = await context.execute(db, () => queryDatabase());
-
-// Fine-grained operations when specific endpoints need overrides:
-final readOp = userService.operation(
-  'readUser',
-  hedgingOverride: HedgingConfig(enabled: true, delay: Duration(milliseconds: 100)),
-);
-final result = await context.execute(readOp, () => fetchUser());
-```
-
-### Criticality-Aware Throttling
-
-Operations can be configured with a `Criticality` level. Under overload, adaptive throttling will discard sheddable traffic first to protect critical path operations.
-
-```dart
-final backgroundSync = Operation(
-  'sync', 
-  myService, 
+// Fine-grained operations with overrides & criticality tiers
+final backgroundSync = paymentService.operation(
+  'backgroundSync',
   criticality: Criticality.sheddable,
+  retryOverride: RetryConfig(maxAttempts: 1),
 );
-
-final userAction = Operation(
-  'checkout', 
-  myService, 
-  criticality: Criticality.criticalPlus,
-);
+await context.execute(backgroundSync, () => syncTelemetry());
 ```
 
-To enable this, `ThrottlingConfig` automatically spreads the sensitivity multiplier (`K`) across different criticality levels.
+---
 
-By default, `ThrottlingConfig(k: base, spread: 1.0)` calculates the effective `K` for each level as:
-*   **`criticalPlus`**: `k * 4.0` (tolerant to failures, default `8.0`).
-*   **`critical`** (default level): `k` (default `2.0`).
-*   **`sheddablePlus`**: `max(k * 0.8, 1.1)` (default `1.6`).
-*   **`sheddable`**: `max(k * 0.6, 1.1)` (default `1.2`).
+## Client & Flutter Guide
 
-A lower `K` makes throttling more aggressive. Under default settings, `sheddable` traffic starts throttling earlier (when failures exceed 16%), while `critical` traffic tolerates up to 50% failures, and `criticalPlus` is shielded from throttling.
+Mobile and client-side web applications have distinct operational constraints:
+- Requests are sporadic and user-initiated (low QPS).
+- Mobile radio power states mean repeatedly retrying against dead backends rapidly drains battery and wastes cellular bandwidth.
+- Fast, deterministic UI feedback is critical when services are down or slow.
 
-You can adjust the width of this spread using the `spread` parameter (setting `spread: 0.0` collapses all levels to use the same base `k`).
+### Recommended Client Patterns
+1. **Circuit Breakers**: Stop repeating requests to dead backends. Failing fast prevents UI freezes and avoids draining the device radio.
+2. **Exponential Backoff with Full Jitter**: Randomizes retry delays (`_random * cappedDelay`) to prevent thousands of mobile apps from hitting a recovering API simultaneously.
+3. **Static Hedging**: For search autocomplete or critical reads, dispatch a second speculative request after a fixed delay (e.g. 150–250ms) without waiting for a full 5-second timeout.
+4. **Lifecycle Cancellation**: Bind `CancellationToken` to Flutter widget disposal to cancel in-flight HTTP requests when the user navigates away.
 
-For complete control, you can configure the values explicitly using a Dart Record:
+### Flutter Example: Search Autocomplete with Static Hedging & Cancellation
 ```dart
-final myService = Resource(
-  'my-service',
-  config: ResourceConfig(
-    throttling: ThrottlingConfig.withCriticality(
-      k: (
-        criticalPlus: 10.0,
-        critical: 2.0,
-        sheddablePlus: 1.5,
-        sheddable: 1.1,
-      ),
+class SearchRepository {
+  final _policy = ResiliencePolicy(
+    circuitBreaker: CircuitBreakerConfig(
+      consecutiveFailuresThreshold: 3,
+      resetTimeout: const Duration(seconds: 10),
     ),
-  ),
-);
-```
-
-
-### Dynamic Hedging Configuration
-
-To enable dynamic hedging, configure `dynamicPercentile` (e.g., `0.95` for P95) in the `HedgingConfig`. The library will dynamically adjust the hedging delay based on runtime latency samples.
-
-```dart
-final myService = Resource(
-  'my-service',
-  config: ResourceConfig(
+    retry: RetryConfig(maxAttempts: 2),
     hedging: HedgingConfig(
       enabled: true,
-      dynamicPercentile: 0.95, // Track P95 latency
-      delayMultiplier: 2.0,    // Hedge delay is 2 * P95
-      minDelay: Duration(milliseconds: 10),
-      maxDelay: Duration(seconds: 2),
-      adaptationRate: 10.0,    // Speed of adaptation
-      overloadPercentile: 0.95, // Refill rate for token bucket (max 5% hedged requests)
-      maxOverloadTokens: 10.0,
-      maxConcurrentHedges: 5,   // Concurrency limit per resource
+      delay: const Duration(milliseconds: 150), // Static delay for client
+    ),
+    timeout: const Duration(seconds: 3),
+  );
+
+  Future<List<String>> search(String query, {CancellationToken? token}) async {
+    final effectiveToken = token ?? CancellationToken();
+    return await ResilienceContext.runWithCancellationToken(
+      effectiveToken,
+      () => _policy.executeCancelable((cancelCompleter) async {
+        return await api.fetchSuggestions(query, cancelToken: effectiveToken);
+      }),
+    );
+  }
+}
+```
+
+> [!TIP]
+> **What to avoid in Flutter / Client apps**:
+> - Avoid **Adaptive Throttling**: Because clients make relatively few requests, rolling-window rejection probabilities are statistically noisy and may shed legitimate user actions.
+> - Avoid **Dynamic Hedging**: Stochastic percentile tracking requires steady traffic to learn latency percentiles. Use **Static Hedging** instead.
+
+---
+
+## Server-to-Server Distributed Resilience
+
+For backend services, microservices, and API gateways under continuous load, the library implements advanced distributed systems patterns from Google SRE.
+
+### Adaptive Throttling (Google SRE Book, Chapter 21)
+When downstream services become overloaded, retries and incoming requests can trigger cascading failures. Adaptive throttling runs client-side to calculate a probabilistic rejection rate based on the ratio of accepted requests to total requests over a rolling window (default 2 minutes):
+
+$$P_{\text{throttle}} = \max\left(0, \frac{\text{requests} - K \times \text{accepts}}{\text{requests} + 1}\right)$$
+
+- **`requests`**: Total requests issued to the backend within the rolling window.
+- **`accepts`**: Number of requests accepted (succeeded) by the backend.
+- **`K` (Acceptance Multiplier)**: Controls aggressiveness. A value of `2.0` means the client allows twice as many requests as the backend accepts, tolerating up to a 50% failure rate before shedding traffic. Lower `K` makes throttling more aggressive.
+- **`minRequests`**: If `requests < minRequests`, $P_{\text{throttle}} = 0.0$ to prevent throttling on startup or low traffic.
+
+When throttled, requests fail fast locally with a `ThrottledException` before reaching the network.
+
+### Criticality-Aware Load Shedding
+Traffic is not created equal. Under overload, backend systems must sacrifice background or batch work to preserve interactive user journeys.
+
+The library supports four criticality tiers:
+1. `Criticality.criticalPlus`: High-priority traffic (e.g. checkout, login).
+2. `Criticality.critical`: Default production traffic.
+3. `Criticality.sheddablePlus`: Batch operations, speculative reads.
+4. `Criticality.sheddable`: Telemetry, prefetching, offline sync.
+
+The base multiplier `K` is automatically distributed across levels using the `spread` factor (default `1.0`):
+- `criticalPlus`: $\max(1.1, K \times (1.0 + 3.0 \times \text{spread}))$
+- `critical`: $\max(1.1, K)$
+- `sheddablePlus`: $\max(1.1, K \times (1.0 - 0.2 \times \text{spread}))$
+- `sheddable`: $\max(1.1, K \times (1.0 - 0.4 \times \text{spread}))$
+
+With default settings ($K = 2.0, \text{spread} = 1.0$):
+- `criticalPlus` ($K = 8.0$): Tolerates up to 87.5% failure before throttling.
+- `critical` ($K = 2.0$): Tolerates up to 50% failure before throttling.
+- `sheddablePlus` ($K = 1.6$): Starts shedding at 37.5% failure.
+- `sheddable` ($K = 1.2$): Starts shedding at 16.7% failure.
+
+Custom explicit values can also be provided via Dart Records:
+```dart
+final backend = Resource(
+  'inventory-db',
+  throttling: ThrottlingConfig.withCriticality(
+    k: (
+      criticalPlus: 10.0,
+      critical: 2.0,
+      sheddablePlus: 1.5,
+      sheddable: 1.1,
     ),
   ),
 );
 ```
 
-### How Dynamic Hedging Works
+### Retry Budgets (Preventing Retry Storms)
+A traditional retry mechanism retries every failed request up to $N$ times. If a downstream service is struggling, this triples traffic ($3\times$ QPS) right when the service is most vulnerable—a catastrophic "retry storm".
 
-Adaptive hedging dynamically adjusts the delay before starting a speculative hedge request, responding to changes in backend latency. It implements several advanced mechanisms to ensure stability, fast reaction times, and overload protection.
+A **Retry Budget** limits the proportion of requests in a rolling window (`budgetWindow`, default 1 minute) that can be retries:
+$$\text{Allowed if: } (\text{retries} + 1) \le (\text{requests} + 1) \times \text{retryBudgetRatio}$$
+- Default: `retryBudgetRatio: 0.1` (at most 10% of total traffic can be retries).
+- Guarded by `minRequestsForBudget` (default 10) to avoid false rejections during cold start.
+- If the budget is exhausted, further retries are suppressed and the failure is rethrown immediately.
 
-#### 1. Retrospective Hedging (Avoiding the Feedback Loop)
-A naive adaptive hedging implementation might only measure the latency of *unhedged* requests (requests that complete before the hedging threshold). However, during a global backend slowdown, this suffers from **survival bias**: the client only measures the few requests that happened to complete quickly. The tracker would falsely conclude the backend is fast, lower the hedging delay, and trigger a runaway loop where 100% of traffic is hedged, DDOSing the backend.
+### Dynamic (Adaptive) Request Hedging
+Request hedging mitigates tail latency ("The Tail at Scale", Dean & Barroso) by speculatively launching a parallel secondary request if the primary request exceeds a latency threshold.
 
-To prevent this, the library implements **Retrospective Hedging**:
-*   It tracks the **best of multiple attempts** (the minimum latency between the primary and the hedged request) for each logical call: `min(latency_primary, latency_hedge)`.
-*   If the backend slows down globally, both attempts will be slow. The tracked latency increases, pushing the hedging delay up and reducing the rate of hedges.
-*   Combined with the **Token Bucket** (see below), this mathematically guarantees that the feedback loop is broken and the system remains stable.
+> [!IMPORTANT]
+> Only use request hedging for **idempotent** operations (e.g. read RPCs). Hedging duplicates network requests!
 
-#### 2. Stochastic Percentile Tracking (Robbins-Monro Algorithm)
-To avoid the CPU and memory overhead of storing a rolling window of hundreds of latency samples, the library uses a **stochastic approximation algorithm** (Robbins-Monro) to track the target percentile (e.g., P95) in `O(1)` space and time:
-*   On every request, the current raw estimate `V` is updated based on whether the request's best latency was "slow" (exceeded `V`) or "fast" (was below `V`).
-*   If slow, the estimate is increased: `V_new = V_old × (1 + P / R)`
-*   If fast, the estimate is decreased: `V_new = V_old × (1 - (1 - P) / R)`
-*   Where `P` is the target `dynamicPercentile` (e.g., `0.95`) and `R` is the `adaptationRate` (e.g., `10.0`). At the target percentile, the expected change is zero, causing the estimate to track the true percentile.
+Dynamic hedging eliminates manual delay tuning by continuously tracking runtime latency percentiles with three mathematical safeguards:
 
-#### 3. Early Registration
-During a sudden backend outage, waiting for requests to timeout or finish before updating the tracker would cause a slow reaction time.
-*   To solve this, the library starts an **Early Registration Timer** set to the raw percentile estimate `V` when a request begins.
-*   If the primary request exceeds `V`, it is immediately registered as a "slow" sample, adjusting the tracker upward *before* the request even completes or is hedged.
-*   Only one sample is registered per logical request (subsequent completions of the primary or hedge are ignored by the tracker).
+#### 1. Stochastic Percentile Tracking (Robbins-Monro Algorithm)
+To eliminate memory overhead and GC pressure from storing rolling latency arrays, the library uses a stochastic approximation algorithm that converges in $O(1)$ space and time:
+- Let $V$ be the raw percentile estimate, $P$ be `dynamicPercentile` (e.g. 0.95 for P95), and $R$ be `adaptationRate` (default 10.0, required $R > 1.0 - P$):
+- If the request was **slow** ($> V$):
+  $$V_{\text{new}} = V_{\text{old}} \times \left(1 + \frac{P}{R}\right)$$
+- If the request was **fast** ($< V$):
+  $$V_{\text{new}} = V_{\text{old}} \times \left(1 - \frac{1 - P}{R}\right)$$
+- The actual hedging delay applied is $T_{\text{hedge}} = V \times \text{delayMultiplier}$ (clamped between `minDelay` and `maxDelay`).
 
-#### 4. Overload Protection
-To protect the backend from being overwhelmed by speculative requests:
-*   **Hedging Token Bucket**: A rate limiter that refills tokens at a rate of `1.0 - overloadPercentile` on every logical request. Starting a hedge consumes 1 token. If the bucket is empty, hedging is blocked. This limits the long-term overhead of hedging to at most `1 - overloadPercentile` (e.g., 5% of traffic).
-*   **Concurrency Limit**: Caps the absolute number of concurrent active hedges (`maxConcurrentHedges`) per resource.
-*   **Bypass in Half-Open**: Hedging is automatically disabled when the Circuit Breaker is in the `halfOpen` state, ensuring trial requests do not spawn speculative duplicates.
+#### 2. Retrospective Latency Tracking (Feedback Loop Elimination)
+If a backend experiences a global slowdown, naive hedging only observes fast completions (survival bias), falsely lowering the hedging delay and triggering a self-inflicted DDoS.
+- The library uses **Retrospective Tracking**: it evaluates $\min(\text{latency}_{\text{primary}}, \text{latency}_{\text{hedge}})$.
+- When the backend slows down globally, both attempts are slow. The tracker observes this shift, increases $V$, and delays or reduces hedging.
 
-### Dynamic vs. Static Hedging
+#### 3. Early Registration & Token Bucket Overload Protection
+- **Early Registration**: When a request begins, an internal timer fires at $V$. If the primary request is still running, it is immediately registered as "slow" *before* waiting for the request or hedge to complete, giving instantaneous reaction to latency spikes.
+- **Hedging Token Bucket**: Refilled at rate $1.0 - \text{overloadPercentile}$ on every logical request (e.g., 0.05 tokens for P95). Starting a hedge consumes 1 token. When the bucket is empty, speculative hedges are blocked, mathematically capping maximum excess traffic to $1 - \text{overloadPercentile}$ (e.g., 5%).
+- **Concurrency Cap**: `maxConcurrentHedges` limits simultaneous in-flight hedges per resource.
 
-While both static and dynamic hedging aim to mitigate tail latency by sending speculative parallel requests, they differ significantly in their adaptation to network conditions, operational overhead, and failure modes.
-
-#### Comparison under Different Scenarios
-
-| Scenario | Static Hedging | Dynamic (Adaptive) Hedging |
-| :--- | :--- | :--- |
-| **Stable Load** | Good. If the delay is tuned correctly (e.g., P95 latency), it provides low tail latency with predictable overhead (~5% extra traffic). | Good. Automatically discovers and tracks the baseline latency, minimizing extra traffic without manual tuning. |
-| **Latency Spikes** (Temporary) | Moderate. May fail to hedge if the spike is below the static threshold, or hedge excessively if the baseline latency temporarily shifts. | Excellent. Quickly adapts by tracking the percentile shift, ensuring hedges are sent when needed while avoiding excessive duplicates. |
-| **Global Backend Slowdown** | **Dangerous**. If backend latency exceeds the fixed delay globally, 100% of requests will be hedged. This doubles the traffic, worsening the overload. | **Safe**. The tracker observes the slowdown and increases the hedging delay. Combined with the token bucket, it limits overhead to a safe maximum (e.g., 5%). |
-
-#### Trade-offs of Dynamic Hedging
-
-*   **Complexity**: Requires runtime latency tracking (stochastic approximation) and rate limiting (token bucket, concurrency limits). This introduces more configuration parameters (e.g., `adaptationRate`, `overloadPercentile`) that must be understood.
-*   **Cold Start**: At startup or after long idle periods, the latency tracker has no history. It relies on initial estimates, which may cause sub-optimal hedging (either too many hedges or missed opportunities) until it converges.
-*   **State Interference & Drift**:
-    *   *Resource Sharing*: Since the latency estimate is shared at the `Resource` level, running operations with vastly different latency profiles (e.g., a 10ms read vs. a 5s write) on the same resource will corrupt the shared estimate.
-    *   *Traffic Patterns*: The tracker relies on a continuous flow of requests to maintain an accurate model. In systems with highly bursty traffic or very low volume, the tracker may drift or react slowly to changes.
-
-#### When to Prefer Static Hedging
-
-Despite the benefits of dynamic hedging, static hedging is preferred in several scenarios:
-
-*   **Short-Lived Clients**: For CLI tools, serverless functions, or short-lived tasks that only make a few requests, the dynamic tracker does not have enough time to warm up and adapt. A pre-configured static delay is more effective.
-*   **Strict SLAs**: When you have a hard guarantee (e.g., "always hedge if the request takes longer than 50ms"), static hedging ensures this limit is strictly enforced, whereas dynamic hedging might adapt to a higher delay during backend degradation.
-*   **Deterministic Latency**: If the target service has a highly predictable and stable latency profile that rarely changes, static hedging provides the same benefits as dynamic hedging with less complexity.
-*   **Simplicity and Debuggability**: Static hedging is easier to reason about, configure, and debug, as the hedging decision is entirely deterministic and based on a single fixed parameter.
-
-### Deadline and Cancellation Propagation
-
-You can use the static methods on `ResilienceContext` to propagate deadlines and cancellation tokens down your call chain.
-
-#### Implicit Propagation
-
-Child operations executed within the context of a parent operation automatically inherit the parent's deadline and cancellation token:
-
+### Hierarchical Resources & Nested Topologies
+Model complex architectures where fine-grained endpoints share backend infrastructure:
 ```dart
-final context = ResilienceContext();
-
-final myService = Resource('my-service', config: ResourceConfig(
-  timeout: Duration(milliseconds: 500), // Parent timeout
-));
-
-await context.executeCancelable(Operation('parent', myService), (cancel) async {
-  // Child operation automatically inherits the 500ms deadline
-  await context.executeCancelable(Operation('child', myService), (childCancel) async {
-    final childDeadline = ResilienceContext.currentDeadline; // Same as parent deadline
-    final remainingTime = childDeadline?.difference(DateTime.now()) ?? Duration(seconds: 1);
-    
-    // Pass the remaining timeout to your HTTP client
-    await httpClient.get('/api/data', timeout: remainingTime); 
-  });
-});
+final databaseCluster = Resource('postgres-cluster');
+final userEndpoint = Resource('users-api', parent: databaseCluster);
+final orderEndpoint = Resource('orders-api', parent: databaseCluster);
 ```
+- **Parent-to-Child Propagation**: If `postgres-cluster` circuit breaker trips to `OPEN`, all operations on `users-api` and `orders-api` fail fast immediately.
+- **Selective Isolation**: If `users-api` trips its circuit breaker due to a buggy query, `orders-api` and `postgres-cluster` remain healthy.
+- **Deadlock-Free Recovery**: When a parent is open, child requests act as trial requests once the parent's reset timeout expires.
 
-#### Explicit Zone Entry
+### Deadline & Cancellation Propagation
+Distributed requests often span multiple services ($A \to B \to C$). If $A$ times out or the caller disconnects, $B$ and $C$ must not waste CPU on abandoned "zombie requests".
 
-To start a call chain with an external deadline or token (e.g., extracted from incoming HTTP headers in a server):
-
+Dart `Zone`s implicitly carry deadlines and cancellation signals across async execution chains:
 ```dart
+// Propagate incoming HTTP headers (e.g., in Shelf or Dart Frog middleware)
 final incomingDeadline = DateTime.parse(request.headers['X-Server-Deadline']!);
-final parentToken = CancellationToken(); // Can be linked to client connection close
+final clientToken = CancellationToken(); // attached to client socket close
 
 await ResilienceContext.runWithDeadline(incomingDeadline, () {
-  return ResilienceContext.runWithCancellationToken(parentToken, () async {
-    // Any operations executed here will respect the incoming deadline and parent token
-    await context.execute(Operation('db-read', dbResource), () async {
-       return await db.read();
-    });
+  return ResilienceContext.runWithCancellationToken(clientToken, () async {
+    // Child calls automatically inherit the deadline and cancellation token
+    final result = await dbService.execute(() => db.query());
   });
 });
 ```
+- **Deadline Merging**: When nested deadlines are encountered, the earlier deadline always wins.
+- **Cancellation**: Cancelling a parent `CancellationToken` immediately aborts all children with `OperationCancelledException`.
 
-## Combining Patterns (Best Practices)
+---
 
-When combining Retry, Circuit Breaker, Hedging, and Adaptive Throttling, the order of execution and how they share state is critical to prevent them from conflicting.
+## Execution Pipeline Architecture
+
+When combining Retry, Circuit Breakers, Hedging, and Adaptive Throttling, their relative ordering is vital to prevent conflicting behavior.
 
 ### Execution Order
-
-The library automatically coordinates and enforces these patterns in the following order (from outer wrapper to inner execution):
-
-1.  **Circuit Breaker (First Gate)**: Fails fast immediately if the circuit is `open` (broken path, requests blocked). This protects the backend and prevents CPU/resource waste on the client.
-
-2.  **Adaptive Throttling (Second Gate)**: Proactively drops requests probabilistically if the client detects the backend is overloaded.
-    *   *Note: Throttling is bypassed for trial requests when the Circuit Breaker is in the `halfOpen` state to ensure the trial request can reach the backend to test its health.*
-3.  **Overall Timeout**: Binds the entire operation's duration, including all retries and hedges.
-4.  **Retry Loop**: Wraps the hedging logic. This treats the speculative hedged attempts as a single "logical attempt". If both the primary and hedge requests fail, the retry loop starts a new attempt.
-5.  **Hedging**: Speculatively starts parallel attempts if the primary attempt is slow.
-6.  **Per-Attempt Timeout**: Handled by your HTTP client to bound individual network connections.
+The library orchestrates resilience patterns in the following strict order (outer wrapper to inner call):
 
 ```
-Client Request
-└── [Circuit Breaker Check (Fail-Fast)]
-    └── [Adaptive Throttling] (bypassed if CB is Half-Open)
-        └── [Overall Timeout (Deadline)]
-            └── [Retry Loop]
-                └── [Hedging Loop]
-                    └── [Per-Attempt Timeout (Client HTTP)]
-                        └── Actual Call
+Incoming Request
+  │
+  ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Circuit Breaker Gate                                     │ ──► [OPEN] Fail fast with CircuitBreakerOpenException
+└──────────────────────────────┬──────────────────────────────┘
+                               │ [CLOSED / Allowed Trial]
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. Adaptive Throttling Gate                                 │ ──► [THROTTLED] Proactively shed with ThrottledException
+│    (Bypassed for CB Half-Open trial requests)               │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ [Accepted]
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Overall Timeout (Zone Deadline)                          │ ──► [DEADLINE] Abort with ResilienceTimeoutException
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 4. Retry Loop                                               │
+│    • Checked against Retry Budget                           │
+│    • Exponential Backoff + Full Jitter                      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Logical Attempt
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 5. Request Hedging Loop                                     │
+│    • Launches primary request                               │
+│    • Dispatches speculative hedge after delay               │
+│    • Bounded by Token Bucket & Concurrency Cap              │
+│    • Early registration timer updates percentile tracker    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+                        [ Target Action ]
 ```
 
 ### Why Retry Wraps Hedging (Not Vice Versa)
+- If Hedging wrapped Retry, starting a speculative hedge would launch a *second parallel retry loop*. During an outage, this would cause exponential traffic multiplication.
+- By placing Retry on the outside, a hedged attempt is treated as part of a single logical attempt. If either the primary or hedged request succeeds, the logical attempt succeeds. A retry is only triggered if *both* primary and hedged calls fail.
 
-Wrapping Hedging with Retry ensures that we only retry if *both* the primary request and its hedge fail.
-If Hedging wrapped Retry, starting a hedge would initiate a second parallel retry loop. During a backend slowdown, this would trigger exponential request multiplication, worsening the overload.
+### Metric Isolation
+- **Throttling & Circuit Breakers** record metrics at the *logical attempt* level. If a primary request times out but its hedge succeeds, the operation is recorded as a success.
+- **Retry Budgets** only count retries triggered by the outer retry loop. Speculative hedges do not consume retry budget permits.
+- **Circuit Breaker fast-fails** and **Adaptive Throttling drops** do not record failures into each other's metrics.
 
-### How Metrics Interact
+---
 
-To maintain accurate health metrics:
-*   **Throttling & CB** record results at the logical attempt level. If a primary attempt fails but a speculative hedge succeeds, the overall attempt is recorded as a success, preventing false-positive circuit breaker trips. If both primary and hedge fail, a single failure is recorded.
-*   **Retry Budget** only counts *logical retries* initiated by the Retry loop. Speculative hedge attempts do not consume the retry budget.
-*   **CB-Blocked Requests** do not record failures in Throttling, ensuring that local fast-fails do not pollute throttling metrics.
+## Failure Classification
 
-### Configuration Rules of Thumb
+By default, the library distinguishes system failures from application-level client errors:
+- **Ignored (Not System Failures)**:
+  - Programmer errors: `ArgumentError`, `RangeError`, `FormatException`, `TypeError`, `AssertionError`.
+  - Control-flow exceptions: `CircuitBreakerOpenException`, `ThrottledException`, `OperationCancelledException`.
+  - These never trip the circuit breaker or inflate throttling failure counts.
+- **Counted as System Failures**:
+  - All other unhandled exceptions (e.g. `SocketException`, `HttpException`, timeouts).
 
-*   **Circuit Breaker `consecutiveFailuresThreshold`** must be set to **at least `maxAttempts + 2`** (e.g., if max retry attempts is 3, set CB threshold to 5). Otherwise, a single request exhausting its retries will trip the circuit breaker for all other traffic.
-*   **Hedging Delay**:
-    *   For **Static Hedging**, set `delay` to the **P90 or P95 latency** of the target service under normal load. This ensures you only duplicate the slowest 10% or 5% of requests.
-    *   For **Dynamic Hedging**, set `dynamicPercentile` to `0.90` or `0.95` and the library will track this latency automatically. Use `delayMultiplier` (default `2.0`) to apply a safety margin before sending the hedge.
-    *   Use `overloadPercentile` (default `0.95`) to prevent hedging from exceeding a safe fraction of total traffic (e.g., 5% of requests) under sustained backend slowness.
-*   **Adaptive Throttling `k` & `spread`**:
-    *   **`k`** (base multiplier) should default to **`2.0`** (which sets the sensitivity for the default `critical` traffic, allowing up to 50% failures).
-    *   **`spread`** (default **`1.0`**) controls how aggressively sheddable traffic is dropped relative to critical traffic. Adjusting `spread` to `0.0` disables priority-based throttling, treating all traffic equally.
+You can supply a custom `failureClassifier` to customize this (e.g., treating HTTP 4xx as client errors and 5xx as system failures):
+```dart
+final config = ResourceConfig(
+  failureClassifier: (error) {
+    if (error is HttpException) {
+      // 4xx errors are client mistakes, not downstream system failures
+      return error.statusCode >= 500;
+    }
+    return true;
+  },
+);
+```
+
+---
+
+## Interactive Terminal Simulator
+
+The package includes an interactive full-screen terminal dashboard to simulate and observe resilience patterns in real-time under load spikes, latency brownouts, and service breakdowns.
+
+```bash
+dart run example/simulator.dart
+```
+
+See [example/README.md](example/README.md) for full interactive controls, hotkeys, and scenario playbooks.
+
+---
 
 ## References
 
 *   **Google SRE Book - Handling Overload**: [Chapter 21](https://sre.google/sre-book/handling-overload)
 *   **Google SRE Book - Addressing Cascading Failures**: [Chapter 22](https://sre.google/sre-book/addressing-cascading-failures)
-*   **The Tail at Scale**: [Dean & Barroso](https://cacm.acm.org/magazines/2013/2/160173-the-tail-at-scale/fulltext)
+*   **The Tail at Scale**: [Jeffrey Dean and Luiz André Barroso (CACM)](https://cacm.acm.org/magazines/2013/2/160173-the-tail-at-scale/fulltext)
 *   **Circuit Breaker Pattern**: [Martin Fowler](https://martinfowler.com/bliki/CircuitBreaker.html)
+*   **Exponential Backoff and Jitter**: [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)
 
 ## Disclaimer
 

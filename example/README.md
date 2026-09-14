@@ -1,77 +1,197 @@
-# Interactive Resilience Simulator
+# Examples & Interactive Simulator
 
-An interactive terminal dashboard to visualize and experiment with client-side resilience patterns under backend overload, slowness, and failures.
+This folder contains practical code examples showing how to use `package:circuit_breaker` in client (Flutter) applications and server-side distributed RPC architectures, as well as the interactive terminal resilience simulator.
 
-The simulator demonstrates the following patterns:
-*   **Retry**: Retrying failed requests with backoff.
-*   **Circuit Breaker**: Failing fast when the service is down to prevent resource exhaustion.
-*   **Hedging**: Sending duplicate requests to reduce tail latency.
-*   **Adaptive Throttling**: Client-side load shedding based on backend rejection probability, with traffic isolation by criticality.
+---
 
-## How to Run
+## 1. Flutter & Client Application Examples
 
-To run the simulator, execute the following command in your terminal:
+Client applications have low QPS and need fast, deterministic feedback to conserve device battery and avoid UI hangs.
+
+### Repository Pattern with Circuit Breaker & Exponential Backoff
+This pattern protects the client from repeated network calls when an API is down, failing fast to display offline UI.
+
+```dart
+import 'package:circuit_breaker/circuit_breaker.dart';
+
+class UserProfileRepository {
+  final _policy = ResiliencePolicy(
+    circuitBreaker: CircuitBreakerConfig(
+      consecutiveFailuresThreshold: 3,
+      resetTimeout: const Duration(seconds: 15),
+    ),
+    retry: RetryConfig(
+      maxAttempts: 3,
+      baseDelay: const Duration(milliseconds: 200),
+      maxDelay: const Duration(seconds: 2),
+      enableJitter: true, // Prevents synchronized client retry bursts
+    ),
+    timeout: const Duration(seconds: 5),
+  );
+
+  Future<UserProfile> fetchProfile(String userId) async {
+    try {
+      return await _policy.execute(() => apiClient.getUserProfile(userId));
+    } on CircuitBreakerOpenException {
+      // Circuit is open: fail fast and show cached offline data immediately
+      return cache.getUserProfile(userId);
+    }
+  }
+}
+```
+
+### Search Autocomplete with Static Hedging & Cancellation
+For search-as-you-type, speculative hedging dispatches a duplicate request if the primary takes longer than a fixed threshold (e.g. 150ms). When the user types another letter, the previous request is cancelled via `CancellationToken`.
+
+```dart
+import 'package:circuit_breaker/circuit_breaker.dart';
+
+class SearchService {
+  final _policy = ResiliencePolicy(
+    hedging: HedgingConfig(
+      enabled: true,
+      delay: const Duration(milliseconds: 150), // Static delay for client
+    ),
+    timeout: const Duration(seconds: 2),
+  );
+
+  CancellationToken? _activeSearchToken;
+
+  Future<List<String>> onQueryChanged(String query) async {
+    // Cancel any previous in-flight search request
+    _activeSearchToken?.cancel();
+    _activeSearchToken = CancellationToken();
+
+    final token = _activeSearchToken!;
+    return await ResilienceContext.runWithCancellationToken(
+      token,
+      () => _policy.executeCancelable((cancelCompleter) async {
+        return await apiClient.queryAutocomplete(query, cancelToken: token);
+      }),
+    );
+  }
+}
+```
+
+---
+
+## 2. Server-to-Server Distributed RPC Examples
+
+Backend services and API gateways handle continuous traffic (high QPS) and coordinate multiple downstream microservices.
+
+### Microservice Topology with Hierarchical Resources & Throttling
+See `example/main.dart` for a complete runnable end-to-end example.
+
+```dart
+import 'package:circuit_breaker/circuit_breaker.dart';
+
+void main() async {
+  final context = ResilienceContext();
+
+  // 1. Shared Database Cluster (Parent Resource)
+  final dbCluster = Resource(
+    'db-cluster',
+    circuitBreaker: CircuitBreakerConfig(
+      consecutiveFailuresThreshold: 10,
+      resetTimeout: const Duration(seconds: 10),
+    ),
+  );
+
+  // 2. Child Service Resource (Inherits parent health, adds adaptive throttling)
+  final orderService = context.resource(
+    'order-service',
+    parent: dbCluster,
+    throttling: ThrottlingConfig(
+      k: 2.0, // Google SRE adaptive throttling
+      windowDuration: const Duration(minutes: 2),
+    ),
+    retry: RetryConfig(
+      maxAttempts: 3,
+      retryBudgetRatio: 0.1, // Max 10% retries to avoid retry storms
+    ),
+  );
+
+  // 3. Define operations with criticality tiers
+  final checkoutOp = orderService.operation(
+    'checkout',
+    criticality: Criticality.criticalPlus, // Protected from shedding
+  );
+
+  final syncOp = orderService.operation(
+    'exportMetrics',
+    criticality: Criticality.sheddable, // Shed first under backend load
+  );
+
+  // Execute operations
+  final orderId = await context.execute(checkoutOp, () => db.insertOrder());
+}
+```
+
+### End-to-End Deadline Propagation in HTTP Middleware
+Propagate incoming server deadlines across downstream RPCs to prevent zombie requests:
+
+```dart
+import 'package:circuit_breaker/circuit_breaker.dart';
+
+Future<void> handleHttpRequest(Request request) async {
+  final header = request.headers['X-Server-Deadline'];
+  final deadline = header != null ? DateTime.parse(header) : DateTime.now().add(const Duration(seconds: 3));
+  final clientToken = CancellationToken();
+
+  await ResilienceContext.runWithDeadline(deadline, () {
+    return ResilienceContext.runWithCancellationToken(clientToken, () async {
+      // Downstream operations automatically inherit deadline & cancellation
+      final user = await userService.execute(() => fetchUser());
+      final orders = await orderService.execute(() => fetchOrders(user.id));
+    });
+  });
+}
+```
+
+---
+
+## 3. Zero-Boilerplate Ad-Hoc Usage
+
+For lightweight scripts, CLI tools, or one-off operations:
+
+```dart
+import 'package:circuit_breaker/circuit_breaker.dart';
+
+// One-liner retry with exponential backoff and jitter
+final data = await retry(
+  () => httpGet('https://api.example.com/data'),
+  maxAttempts: 3,
+  timeout: const Duration(seconds: 5),
+);
+
+// One-liner speculative hedge for idempotent reads
+final result = await hedge(
+  () => readReplica(),
+  delay: const Duration(milliseconds: 100),
+);
+```
+
+---
+
+## 4. Interactive Terminal Resilience Simulator
+
+The repository includes an interactive terminal dashboard to visualize and experiment with these resilience patterns under backend overload, slowness, and failures in real-time.
 
 ```bash
 dart run example/simulator.dart
 ```
 
-Ensure your terminal window is large enough to display the full dashboard (at least 80x40 is recommended).
+Ensure your terminal window is at least 80x40 to display the full dashboard.
 
-## Dashboard Layout
+### Simulator Dashboard Sections
+- **TRAFFIC METRICS**: Live request rates and cumulative counts segmented by Criticality (`critPlus`, `critical`, `shedPlus`, `sheddable`).
+- **THROTTLING STATES**: Rolling 10s window counts, accepted requests, and dynamic rejection probability $P_{\text{reject}}$.
+- **SHARED MECHANISM STATES**: Circuit Breaker state (`CLOSED`, `OPEN`, `HALF-OPEN`) and Retry Budget ratio vs limit.
+- **VISUAL TRENDS**: 20-second sparklines of overall success rate and sheddable rejection probability.
+- **CONFIGURATIONS & HOTKEYS**: Live parameters for backend latency, failure rate, and resilience limits.
+- **LIVE EVENT LOG**: Scrolling log of significant events (circuit breaker state transitions, throttling rejections, hedges, retries).
 
-The dashboard is divided into several sections, updated in real-time:
-
-### 1. TRAFFIC METRICS (cumulative & rolling rates)
-Displays the request counts and rates (per second) categorized by Criticality (`critPlus`, `critical`, `shedPlus`, `sheddable`).
-*   **Requests**: Total requests initiated by the client.
-*   **Success**: Successfully completed requests.
-*   **Failure**: Requests that failed with a backend error (excluding timeouts and throttled/blocked requests).
-*   **Timeout**: Requests that exceeded the overall timeout.
-*   **Throttled**: Requests shed by the client-side adaptive throttling.
-*   **Blocked (CB)**: Requests blocked by the Circuit Breaker because it is in the `OPEN` state.
-*   **Hedges**: Number of hedged (duplicate) requests sent.
-*   **Retries**: Number of retry attempts.
-
-Values are formatted as `rolling_rate/s (cumulative_count)`. Rolling rates are calculated over a 5-second window.
-
-### 2. THROTTLING STATES (last 10s)
-Shows the state of the adaptive throttling mechanism for each criticality level:
-*   **Window Requests**: Number of requests in the 10-second throttling window.
-*   **Window Accepts**: Number of accepted requests by the backend in the window.
-*   **Rejection Prob**: The probability that a request of this criticality will be throttled (shed) client-side. Higher criticality requests have a higher threshold and are protected longer.
-
-### 3. SHARED MECHANISM STATES
-*   **Circuit Breaker**: Displays the current state (`CLOSED` in green, `OPEN` in red, `HALF-OPEN` in yellow), consecutive failure count, threshold, and recovery countdown when `OPEN`.
-*   **Retry Budget**: Displays client-side retry budget statistics: total requests, retries, current retry ratio, and the configured budget limit (e.g., 10%).
-
-### 4. VISUAL TRENDS (last 20s)
-Sparklines showing the trends over the last 20 seconds:
-*   **Success Rate**: Percentage of successful requests over total outcomes.
-*   **Shedding Prob**: The rejection probability for the lowest criticality (`sheddable`) traffic.
-
-### 5. CONFIGURATIONS & HOTKEYS
-Shows the current backend status and resilience configuration, along with the hotkeys to adjust them:
-*   **Backend**:
-    *   `Base Lat`: Base latency of the backend.
-    *   `Base Fail`: Base failure rate of the backend.
-    *   `Cap`: Backend capacity limit in RPS.
-    *   `RPS`: Current actual RPS sent to the backend.
-    *   `Load`: Load factor (`RPS / Capacity`). If > 100%, backend enters overload, causing latency and failure rate to rise.
-    *   `Lat / Fail`: Effective latency and failure rate (including overload penalty).
-*   **Resilience**:
-    *   `CB Thresh / Reset`: Circuit breaker consecutive failures threshold and reset timeout.
-    *   `Budget`: Retry budget status (`ON` with limit, or `OFF`).
-    *   `Base K`: Adaptive throttling multiplier. Shows derived K values for each criticality.
-    *   `Hedge`: Hedging delay or dynamic status.
-    *   `Timeout`: Overall request timeout.
-
-### 6. LIVE EVENT LOG (last 5)
-A scrolling log of the 5 most recent significant events (e.g., Throttled, Circuit Breaker tripped, Hedged, Retry, Timeout).
-
----
-
-## Interactive Controls (Hotkeys Reference)
+### Interactive Hotkeys Reference
 
 | Hotkey | Action |
 | :--- | :--- |
@@ -93,73 +213,27 @@ A scrolling log of the 5 most recent significant events (e.g., Throttled, Circui
 | **Global** | |
 | `q` | Quit the simulator |
 
----
+### Scenarios Playbook
 
-## Scenarios Playbook
+#### 1. Traffic Spike (Adaptive Throttling & Criticality)
+Press `s` to trigger a sudden 5-second traffic surge:
+- Observe RPS exceed backend capacity and load factor rise above 100%.
+- Client-side adaptive throttling kicks in: rejection probability for `sheddable` traffic rises first.
+- High-priority traffic (`criticalPlus` and `critical`) remains largely unthrottled and succeeds, demonstrating traffic isolation.
 
-Use these playbooks to observe how the resilience mechanisms protect the system.
+#### 2. Latency Brownout & Hedging
+Press `o` to simulate backend latency degradation up to 1000ms:
+- When static hedging is `ON` (`h`), speculative duplicate requests complete before the timeout, preserving high success rates.
+- Toggle hedging `OFF` (`h`) and observe request timeouts spike and success rates collapse.
+- Toggle dynamic hedging `ON` (`H`) to observe Robbins-Monro tracking the P95 latency shift automatically.
 
-### 1. Traffic Spike (Protecting the Backend)
-Simulates a sudden surge in traffic to test client-side load shedding (adaptive throttling).
+#### 3. Service Breakdown & Circuit Breaker
+Press `b` to force a 100% backend failure rate for 5 seconds:
+- Consecutive failures trip the Circuit Breaker to `OPEN`.
+- Requests fail fast locally (`Blocked (CB)`), immediately cutting network traffic to 0 to give the backend breathing room.
+- After the reset timeout, the breaker transitions to `HALF-OPEN`, sending a trial request to verify recovery before closing.
 
-1.  Observe the dashboard under normal conditions. Success rate should be near 100%, and Shedding Prob sparkline should be flat at 0%.
-2.  Press `s` to trigger a **Traffic Spike**.
-3.  **Observe**:
-    *   The Requests rate spikes.
-    *   The backend RPS rises, exceeding the `Cap` (Capacity).
-    *   The Load factor goes well above 100%.
-    *   **Client-side load shedding kicks in**: The Rejection Prob for `sheddable` and `sheddablePlus` traffic rises quickly.
-    *   Look at the TRAFFIC METRICS: `sheddable` traffic shows high Throttled rates.
-    *   **Traffic Isolation**: `critical` and `criticalPlus` traffic remains largely unthrottled (lower rejection probability) and successful, protecting critical user flows.
-4.  After 5 seconds, the scenario ends. Observe the rejection probabilities decay back to 0% and the success rate recover.
-
-### 2. Latency Brownout & Hedging
-Simulates a slow backend to observe how hedging hides latency spikes.
-
-1.  Ensure hedging is `ON` (Toggle shows a delay or `DYNAMIC`, not `OFF`). The default timeout is 500ms.
-2.  Press `o` to trigger a **Latency Brownout**.
-3.  **Observe**:
-    *   The backend latency gradually rises up to 1000ms.
-    *   As latency exceeds the hedging delay (default 100ms), `Hedges` count/rate begins to rise.
-    *   Even though backend latency is high, the overall Success Rate remains high because the hedged attempts (sent early) complete before the 500ms timeout.
-4.  Press `h` to **disable hedging**.
-5.  **Observe**:
-    *   `Hedges` drop to 0.
-    *   Timeout rate spikes because requests now wait for the slow backend and exceed the 500ms timeout.
-    *   Overall Success Rate drops significantly.
-6.  Press `h` again to enable hedging, or press `H` to enable **Dynamic Hedging**.
-    *   With Dynamic Hedging, the simulator estimates the P95 latency and adjusts the hedging delay automatically (shows `DYNAMIC (P95: ... -> Target: ...)`).
-7.  Observe the recovery as the scenario ends and latency returns to normal.
-
-### 3. Service Breakdown & Circuit Breaker
-Simulates a complete backend outage to observe fail-fast behavior.
-
-1.  Press `b` to trigger a **Service Breakdown**. This forces a 100% failure rate for 5 seconds.
-2.  **Observe**:
-    *   Requests begin to fail. Failure rate rises.
-    *   The Circuit Breaker consecutive failure count increases rapidly.
-    *   Once it hits the threshold (default 5), the Circuit Breaker transitions to `OPEN` (red).
-    *   **Fail-Fast**: Immediately, TRAFFIC METRICS shows requests being `Blocked (CB)`. The backend RPS drops to 0 because the client stops sending requests to the broken backend.
-    *   This protects the client from wasting resources and prevents overloading the backend.
-3.  After 5 seconds, the breakdown ends (backend recovers), but the CB remains `OPEN`.
-4.  Wait for the reset timeout (default 5s). The CB transitions to `HALF-OPEN` (yellow).
-5.  **Observe**:
-    *   A trial request is sent. It bypasses adaptive throttling.
-    *   Since the backend has recovered, the trial request succeeds.
-    *   The CB transitions back to `CLOSED` (green), and normal traffic resumes.
-
-### 4. Retry Storm (Budget Protection)
-Demonstrates how a retry budget prevents clients from overloading a failing backend.
-
-1.  First, turn the **Retry Budget OFF** by pressing `r` (shows `Budget: OFF`).
-2.  Trigger failures by pressing `b` (Breakdown) or `v` (Oscillating Failures).
-3.  **Observe**:
-    *   As requests fail, the client retries them.
-    *   Since budget is `OFF`, the client retries every failed request up to 3 times (max attempts).
-    *   Look at the TRAFFIC METRICS: The Backend Attempts rate is up to 3x the Requests rate. This is a Retry Storm, which can keep a struggling backend down.
-4.  Now, press `r` to turn the **Retry Budget ON** (shows `Budget: ON (10%)`).
-5.  With failures still occurring (or trigger another breakdown with `b`):
-6.  **Observe**:
-    *   The Backend Attempts rate is now controlled. It is capped at roughly Requests + 10% (the budget ratio).
-    *   Look at SHARED MECHANISM STATES: The Retry Budget Ratio will be pinned at the 10.0% limit.
-    *   Many failed requests are not retried because the budget is exhausted, protecting the backend from overload.
+#### 4. Retry Storm (Retry Budget)
+Press `r` to toggle the Retry Budget `OFF`, then trigger failures with `b`:
+- The client retries every failed request, generating up to $3\times$ QPS backend attempts (retry storm).
+- Turn the Retry Budget `ON` (`r`): retries are capped at 10% of total requests, protecting the failing service.
