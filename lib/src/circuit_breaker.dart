@@ -88,7 +88,11 @@ final class CircuitBreaker {
     }
 
     if (!allowed) {
-      throw CircuitBreakerOpenException('Circuit breaker is open');
+      throw CircuitBreakerOpenException(
+        'Circuit breaker is open',
+        resetTimeout: config.circuitBreaker.resetTimeout,
+        state: state.circuitState,
+      );
     }
 
     final isRootTrial = state.circuitState == CircuitState.halfOpen;

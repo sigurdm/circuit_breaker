@@ -56,7 +56,11 @@ final class AdaptiveThrottler {
     Criticality criticality = Criticality.critical,
   }) async {
     if (shouldThrottle(criticality)) {
-      throw const ThrottledException('Request was throttled');
+      throw ThrottledException(
+        'Request was throttled',
+        criticality: criticality,
+        rejectionProbability: rejectionProbability(criticality),
+      );
     }
     try {
       final result = await action();
