@@ -996,13 +996,23 @@ final class ResilienceContext {
   /// Clears all tracked resource states.
   void clearResources() => _states.clear();
 
+  /// Gets or creates the [ResourceState] for a resource with [resourceName] and [config].
+  ///
+  /// If a state already exists for [resourceName], its active configuration is updated
+  /// to [config] and the existing state is returned.
+  ///
+  /// Performance is O(1) amortized lookup in the internal state table.
+  ResourceState getOrCreateState(String resourceName, ResourceConfig config) {
+    final state = _states.putIfAbsent(resourceName, () {
+      return ResourceState(config);
+    });
+    state.config = config;
+    return state;
+  }
+
   /// Gets or creates the state for a specific resource.
   ResourceState _getState(Resource resource) {
-    final state = _states.putIfAbsent(resource.name, () {
-      return ResourceState(resource.config);
-    });
-    state.config = resource.config;
-    return state;
+    return getOrCreateState(resource.name, resource.config);
   }
 
   _CheckResult _checkResource(
