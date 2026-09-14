@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'context.dart';
+import 'exceptions.dart';
 
 /// Implements Adaptive Throttling.
 ///
@@ -87,20 +88,4 @@ final class AdaptiveThrottler {
   double rejectionProbability(Criticality criticality) {
     return state.getThrottlingRejectionProbability(criticality);
   }
-}
-
-/// Exception thrown when a request is throttled by the client.
-///
-/// This occurs when the adaptive throttling mechanism determines that the
-/// backend is overloaded based on recent success/failure history, and
-/// proactively rejects the request to avoid adding load.
-final class ThrottledException implements Exception {
-  /// Message describing the reason for throttling.
-  final String message;
-
-  /// Creates a [ThrottledException].
-  const ThrottledException(this.message);
-
-  @override
-  String toString() => 'ThrottledException: $message';
 }
