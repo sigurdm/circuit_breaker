@@ -11,24 +11,6 @@ import 'cancellation.dart';
 import 'events.dart';
 import 'counter.dart';
 
-/// Configuration for a specific resource's resilience policies.
-///
-/// This class aggregates configurations for all supported resilience patterns:
-/// - Circuit Breaker
-/// - Retry with Backoff
-/// - Adaptive Throttling
-/// - Request Hedging
-///
-/// Use this class to customize the behavior for specific named resources.
-///
-/// Example:
-/// ```dart
-/// final config = ResourceConfig(
-///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
-///   retry: RetryConfig(maxAttempts: 5),
-///   hedging: HedgingConfig(enabled: true, delay: Duration(milliseconds: 200)),
-/// );
-/// ```
 /// The default failure classifier used to determine whether an error represents
 /// a service failure (as opposed to client programmer errors or control flow exceptions).
 ///
@@ -52,6 +34,7 @@ bool defaultFailureClassifier(Object e) {
   return true;
 }
 
+/// Fallback default failure classifier delegating to [defaultFailureClassifier].
 bool _defaultFailureClassifier(Object e) => defaultFailureClassifier(e);
 
 /// Safely evaluates [classifier] on [e], falling back to [_defaultFailureClassifier]
@@ -64,6 +47,24 @@ bool safeClassify(bool Function(Object) classifier, Object e) {
   }
 }
 
+/// Configuration for a specific resource's resilience policies.
+///
+/// This class aggregates configurations for all supported resilience patterns:
+/// - Circuit Breaker
+/// - Retry with Backoff
+/// - Adaptive Throttling
+/// - Request Hedging
+///
+/// Use this class to customize the behavior for specific named resources.
+///
+/// Example:
+/// ```dart
+/// final config = ResourceConfig(
+///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 3),
+///   retry: RetryConfig(maxAttempts: 5),
+///   hedging: HedgingConfig(enabled: true, delay: Duration(milliseconds: 200)),
+/// );
+/// ```
 final class ResourceConfig {
   /// Configuration for the circuit breaker mechanism.
   final CircuitBreakerConfig circuitBreaker;
@@ -2007,6 +2008,18 @@ base class ResourceState {
   void hedgeCompleted() {
     touch();
     activeHedges = max(0, activeHedges - 1);
+  }
+
+  /// Refunds a single hedging token to the bucket (e.g. if starting a hedge threw synchronously).
+  ///
+  /// **Internal use only.**
+  @internal
+  void refundHedgingToken() {
+    final hedgingConfig = config.hedging;
+    hedgingTokens = min(
+      hedgingConfig.maxOverloadTokens,
+      hedgingTokens + 1.0,
+    );
   }
 
   /// Records a hedging latency sample to update the dynamic delay estimate.
