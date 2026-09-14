@@ -2,6 +2,8 @@
 
 A production-grade resilience engineering library for Dart backend services and Flutter applications. Implements battle-tested distributed systems patterns inspired by the Google SRE book and *The Tail at Scale*: circuit breaking, adaptive throttling, speculative request hedging, retry budgets with full jitter, deadline propagation, and criticality load shedding.
 
+![Resilience Simulator](doc/assets/simulator.gif)
+
 ---
 
 ## Quick Positioning: Server vs. Client / Flutter
