@@ -45,6 +45,16 @@ export 'src/throttling.dart' show AdaptiveThrottler, ThrottledException;
 export 'src/retry.dart' show Retry, retry;
 export 'src/hedging.dart' show RequestHedger, hedge;
 export 'src/policy.dart' show ResiliencePolicy;
+export 'src/events.dart'
+    show
+        ResilienceEvent,
+        CircuitBreakerStateChangedEvent,
+        RequestThrottledEvent,
+        RetryAttemptEvent,
+        HedgeFiredEvent,
+        OperationCompletedEvent,
+        ResourceMetricsSnapshot,
+        CriticalityThrottlingMetrics;
 export 'src/exceptions.dart'
     show
         CircuitBreakerOpenException,

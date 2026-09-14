@@ -7,6 +7,7 @@ import 'hedging.dart';
 import 'throttling.dart';
 import 'exceptions.dart';
 import 'cancellation.dart';
+import 'events.dart';
 
 /// Configuration for a specific resource's resilience policies.
 ///
@@ -221,6 +222,28 @@ final class Resource implements ResilienceTarget {
     );
   }
 
+  final StreamController<ResilienceEvent> _eventController =
+      StreamController<ResilienceEvent>.broadcast(sync: true);
+
+  /// Stream of resilience events emitted by or targeting this resource.
+  Stream<ResilienceEvent> get events => _eventController.stream;
+
+  /// Internal method to dispatch events to this resource and its parents.
+  @internal
+  void emitEvent(ResilienceEvent event) {
+    if (!_eventController.isClosed) {
+      _eventController.add(event);
+    }
+    parent?.emitEvent(event);
+  }
+
+  /// Takes an immutable point-in-time [ResourceMetricsSnapshot] for this resource
+  /// within [context] (or [ResilienceContext.defaultContext] if omitted).
+  ResourceMetricsSnapshot getSnapshot([ResilienceContext? context]) {
+    final ctx = context ?? ResilienceContext.defaultContext;
+    return ctx.getMetricsSnapshot(this);
+  }
+
   /// Creates an [Operation] targeting this resource.
   Operation operation(
     String name, {
@@ -352,6 +375,12 @@ final class BoundResource implements ResilienceTarget {
     Future<T> Function(A) action, {
     bool Function(Object)? retryOn,
   }) => context.wrapUnary(this, action, retryOn: retryOn);
+
+  /// Stream of resilience events emitted by or targeting this bound resource.
+  Stream<ResilienceEvent> get events => resource.events;
+
+  /// Takes an immutable point-in-time [ResourceMetricsSnapshot] for this bound resource.
+  ResourceMetricsSnapshot getSnapshot() => context.getMetricsSnapshot(resource);
 
   /// Creates an [Operation] on this bound resource.
   Operation operation(
@@ -993,15 +1022,58 @@ final class ResilienceContext {
   bool removeResource(String resourceName) =>
       _states.remove(resourceName) != null;
 
+  final StreamController<ResilienceEvent> _eventController =
+      StreamController<ResilienceEvent>.broadcast(sync: true);
+
+  /// Stream of all resilience events occurring within this context.
+  Stream<ResilienceEvent> get events => _eventController.stream;
+
+  /// Internal method to dispatch an event to the context stream and the target resource.
+  @internal
+  void emitEvent(ResilienceEvent event) {
+    if (!_eventController.isClosed) {
+      _eventController.add(event);
+    }
+    event.resource.emitEvent(event);
+  }
+
+  /// Takes an immutable point-in-time snapshot of metrics for [target].
+  ResourceMetricsSnapshot getMetricsSnapshot(ResilienceTarget target) {
+    final res = target.resource;
+    final state = _getState(res);
+    return state.getSnapshot(res.name);
+  }
+
   /// Clears all tracked resource states.
   void clearResources() => _states.clear();
 
   /// Gets or creates the state for a specific resource.
   ResourceState _getState(Resource resource) {
     final state = _states.putIfAbsent(resource.name, () {
-      return ResourceState(resource.config);
+      final s = ResourceState(resource.config);
+      s.onStateChange = (oldState, newState) {
+        emitEvent(
+          CircuitBreakerStateChangedEvent(
+            resource: resource,
+            timestamp: DateTime.now(),
+            previousState: oldState,
+            newState: newState,
+          ),
+        );
+      };
+      return s;
     });
     state.config = resource.config;
+    state.onStateChange ??= (oldState, newState) {
+      emitEvent(
+        CircuitBreakerStateChangedEvent(
+          resource: resource,
+          timestamp: DateTime.now(),
+          previousState: oldState,
+          newState: newState,
+        ),
+      );
+    };
     return state;
   }
 
@@ -1217,6 +1289,8 @@ final class ResilienceContext {
     final statesToRecord = <ResourceState>{};
     Timer? timeoutTimer;
     bool recordedTimeoutFailure = false;
+    final stopwatch = Stopwatch()..start();
+    final op = target is Operation ? target : null;
 
     try {
       if (executionToken.isCancelled) {
@@ -1239,6 +1313,15 @@ final class ResilienceContext {
           leafRes == _CheckResult.allowedStartTrial;
 
       if (!isHalfOpen && throttler.shouldThrottle(target.criticality)) {
+        final prob = throttler.rejectionProbability(target.criticality);
+        emitEvent(
+          RequestThrottledEvent(
+            resource: resource,
+            timestamp: DateTime.now(),
+            criticality: target.criticality,
+            rejectionProbability: prob,
+          ),
+        );
         throw ThrottledException('Request throttled for ${resource.name}');
       }
 
@@ -1333,6 +1416,8 @@ final class ResilienceContext {
             singleAttempt,
             config: execConfig,
             state: state,
+            resource: resource,
+            context: this,
           );
 
           if (!topLevelCancel.isCompleted && !executionToken.isCancelled) {
@@ -1376,6 +1461,8 @@ final class ResilienceContext {
                 if (e is ResilienceTimeoutException) return false;
                 return retryOn?.call(e) ?? true;
               },
+              resource: resource,
+              context: this,
             );
             if (!executionCompleter.isCompleted) {
               executionCompleter.complete(val);
@@ -1421,8 +1508,27 @@ final class ResilienceContext {
         executionFuture,
         topLevelCancel.future.then((e) => throw e),
       ]);
+      emitEvent(
+        OperationCompletedEvent(
+          resource: resource,
+          timestamp: DateTime.now(),
+          operation: op,
+          duration: stopwatch.elapsed,
+          isSuccess: true,
+        ),
+      );
       return result;
     } catch (e) {
+      emitEvent(
+        OperationCompletedEvent(
+          resource: resource,
+          timestamp: DateTime.now(),
+          operation: op,
+          duration: stopwatch.elapsed,
+          isSuccess: false,
+          error: e,
+        ),
+      );
       if (e is ResilienceTimeoutException &&
           !recordedTimeoutFailure &&
           safeClassify(execConfig.failureClassifier, e)) {
@@ -1503,11 +1609,20 @@ class ResourceState {
   /// The current state of the circuit breaker.
   ///
   /// Should only be mutated by the library.
+  /// Optional callback invoked when circuitState changes.
+  @internal
+  void Function(CircuitState oldState, CircuitState newState)? onStateChange;
+
+  /// The current state of the circuit breaker.
+  ///
+  /// Should only be mutated by the library.
   CircuitState get circuitState => _circuitState;
   set circuitState(CircuitState newState) {
     if (_circuitState != newState) {
+      final oldState = _circuitState;
       _circuitState = newState;
       lastStateChange = DateTime.now();
+      onStateChange?.call(oldState, newState);
     }
   }
 
@@ -1703,6 +1818,41 @@ class ResourceState {
     }
     final kVal = config.throttling.getK(criticality);
     return max(0.0, (requests - kVal * accepts) / (requests + 1));
+  }
+
+  /// Takes an immutable point-in-time [ResourceMetricsSnapshot] of this state.
+  ResourceMetricsSnapshot getSnapshot(String resourceName) {
+    final now = DateTime.now();
+    cleanHistory(now);
+
+    final throttlingMap = <Criticality, CriticalityThrottlingMetrics>{};
+    for (final criticality in Criticality.values) {
+      final reqs = getThrottlingRequests(criticality);
+      final accs = getThrottlingAccepts(criticality);
+      final prob = getThrottlingRejectionProbability(criticality);
+      throttlingMap[criticality] = CriticalityThrottlingMetrics(
+        criticality: criticality,
+        requests: reqs,
+        accepts: accs,
+        rejectionProbability: prob,
+      );
+    }
+
+    return ResourceMetricsSnapshot(
+      resourceName: resourceName,
+      timestamp: now,
+      circuitState: circuitState,
+      consecutiveFailures: failureCount,
+      lastFailureTime: lastFailureTime,
+      lastStateChange: lastStateChange,
+      retryBudgetRequests: getRetryBudgetRequests(),
+      retryBudgetRetries: getRetryBudgetRetries(),
+      retryBudgetRatio: getRetryBudgetRatio(),
+      activeHedges: activeHedges,
+      availableHedgingTokens: hedgingTokens,
+      dynamicDelayEstimate: dynamicDelayEstimate,
+      throttlingByCriticality: Map.unmodifiable(throttlingMap),
+    );
   }
 }
 

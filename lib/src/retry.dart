@@ -3,6 +3,7 @@ import 'dart:math';
 import 'context.dart';
 import 'cancellation.dart';
 import 'exceptions.dart';
+import 'events.dart';
 
 final Random _random = Random();
 
@@ -12,6 +13,8 @@ Future<T> executeWithRetry<T>(
   required ResourceConfig config,
   required ResourceState state,
   bool Function(Object)? retryOn,
+  Resource? resource,
+  ResilienceContext? context,
 }) async {
   final retryConfig = config.retry;
   int attempts = 0;
@@ -71,6 +74,22 @@ Future<T> executeWithRetry<T>(
 
       // Calculate delay with exponential backoff and full jitter
       final delay = _calculateDelay(attempts, retryConfig);
+
+      final res = resource;
+      if (res != null) {
+        final event = RetryAttemptEvent(
+          resource: res,
+          timestamp: DateTime.now(),
+          attemptNumber: attempts + 1,
+          delay: delay,
+          error: e,
+        );
+        if (context != null) {
+          context.emitEvent(event);
+        } else {
+          res.emitEvent(event);
+        }
+      }
 
       final CancellationToken? cancelToken =
           ResilienceContext.currentCancellationToken;
@@ -152,11 +171,14 @@ final class Retry {
   /// The underlying resource state for retry tracking and budgets.
   final ResourceState state;
 
+  /// The resource associated with this retry policy, if any.
+  final Resource? resource;
+
   /// Optional default predicate determining whether an error should be retried.
   final bool Function(Object)? retryOn;
 
   /// Creates a [Retry] wrapping [config] and [state].
-  Retry(this.config, this.state, {this.retryOn});
+  Retry(this.config, this.state, {this.retryOn, this.resource});
 
   /// Creates a standalone [Retry] instance without requiring a full [ResilienceContext].
   factory Retry.standalone({
@@ -185,7 +207,13 @@ final class Retry {
       failureClassifier: failureClassifier,
     );
     final effectiveRetryOn = retryOn ?? failureClassifier;
-    return Retry(cfg, ResourceState(cfg), retryOn: effectiveRetryOn);
+    final res = Resource('standalone_retry', config: cfg);
+    return Retry(
+      cfg,
+      ResourceState(cfg),
+      retryOn: effectiveRetryOn,
+      resource: res,
+    );
   }
 
   /// Executes [action] with retry logic, exponential backoff, and jitter.
@@ -258,6 +286,7 @@ final class Retry {
             config: config,
             state: state,
             retryOn: retryOn ?? this.retryOn,
+            resource: resource,
           );
           if (!executionCompleter.isCompleted) {
             executionCompleter.complete(val);

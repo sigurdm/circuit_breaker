@@ -3,6 +3,7 @@ import 'dart:async';
 import 'context.dart';
 import 'circuit_breaker.dart';
 import 'throttling.dart';
+import 'events.dart';
 
 final class _PolicyTarget implements ResilienceTarget {
   @override
@@ -71,6 +72,13 @@ final class ResiliencePolicy {
 
   /// The adaptive throttler view for this policy.
   AdaptiveThrottler get throttler => AdaptiveThrottler(config, state);
+
+  /// Stream of resilience events emitted by this policy.
+  Stream<ResilienceEvent> get events => _resource.events;
+
+  /// Takes an immutable point-in-time [ResourceMetricsSnapshot] for this policy.
+  ResourceMetricsSnapshot getSnapshot() =>
+      _context.getMetricsSnapshot(_resource);
 
   /// Executes [action] protected by this resilience policy.
   Future<T> execute<T>(
