@@ -1,117 +1,154 @@
-/// HTTP client resilience extensions and utilities for package:circuit_breaker.
+/// HTTP resilience for `package:circuit_breaker`.
 ///
-/// Provides HTTP status code classification, `Retry-After` header parsing,
-/// typed HTTP exceptions, and factory-based execution helpers that respect
-/// full request/response lifecycles.
+/// Rather than wrapping [http.BaseClient], this package attaches resilience at
+/// the *operation* boundary. That distinction matters: `Client.send` completes
+/// as soon as response headers arrive, so a client wrapper records success for
+/// a request whose body later dies mid-stream, and cannot replay a
+/// [http.BaseRequest] that has already been finalized.
+///
+/// Instead, [ResiliencePolicyHttp.executeHttp] takes a *factory* — a fresh
+/// request per attempt — and reads the body to completion inside the protected
+/// operation, so a connection dropped at byte 10 of 100 is a failure the
+/// circuit breaker sees and retry can act on.
+///
+/// Start from [httpPolicy] or [httpResourceConfig]; both pre-wire
+/// [HttpClassifier.isFailure] so client mistakes never trip a breaker.
+///
+/// This library is platform-agnostic and works on native, web and wasm.
 library;
 
 import 'dart:async';
-import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:circuit_breaker/circuit_breaker.dart';
+import 'package:clock/clock.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart' as http_parser;
 
-/// Exception thrown when an HTTP request completes with an error status code.
+/// Thrown when an HTTP request completes with a status code that fails
+/// validation.
+///
+/// > [!NOTE]
+/// > This deliberately sits outside the sealed [ResilienceException]
+/// > hierarchy — Dart does not permit a sealed type to be implemented from
+/// > another library. An exhaustive `switch` over [ResilienceException] will
+/// > not cover HTTP status failures; match [HttpResponseException] separately.
 final class HttpResponseException implements Exception {
-  /// The underlying HTTP response.
+  /// The response whose status failed validation, including its body.
   final http.Response response;
 
-  /// The name of the resource that failed, if known.
+  /// The name of the resource the request targeted, if known.
   final String? resourceName;
 
-  /// The error message.
+  /// A human-readable description of the failure.
+  ///
+  /// Never contains the response body; read [body] for that.
   final String message;
 
-  /// Creates a new [HttpResponseException] wrapping the given [response].
+  /// Wraps [response] as a failure.
   HttpResponseException(this.response, {String? message, this.resourceName})
     : message =
           message ??
-          'HTTP ${response.statusCode} for ${response.request?.url ?? 'unknown URL'}';
+          'HTTP ${response.statusCode} for '
+              '${response.request?.url ?? 'unknown URL'}';
 
-  /// The HTTP status code returned by the server.
+  /// The status code returned by the server.
   int get statusCode => response.statusCode;
 
-  /// The headers returned by the server.
+  /// The response headers, with lower-case keys.
   Map<String, String> get headers => response.headers;
 
-  /// The response body as a string.
+  /// The response body decoded as a string.
   String get body => response.body;
 
-  /// The parsed duration from the `Retry-After` header, or `null` if not present
-  /// or unparseable.
+  /// The `Retry-After` header as a [Duration], or `null` when the header is
+  /// absent or malformed.
+  ///
+  /// For an HTTP-date the value is relative to [clock] at the moment of the
+  /// call, so it shrinks as time passes.
   Duration? get retryAfter => RetryAfterParser.parse(headers['retry-after']);
 
   @override
   String toString() => 'HttpResponseException: $message';
 }
 
-/// Utility for parsing HTTP `Retry-After` headers.
+/// Parses the HTTP `Retry-After` header.
 ///
-/// Supports both integer seconds (RFC 9110 §10.2.3) and HTTP-date formats
-/// (RFC 9110 §5.6.7).
+/// Accepts both forms defined by RFC 9110 §10.2.3: delta-seconds (`120`) and
+/// an HTTP-date (`Wed, 21 Oct 2026 07:28:00 GMT`).
 final class RetryAfterParser {
   RetryAfterParser._();
 
-  /// Parses the given [headerValue] into a [Duration].
+  /// Parses [headerValue] into a [Duration] to wait.
   ///
-  /// Returns `null` if [headerValue] is `null`, empty, or cannot be parsed.
-  /// If the parsed date is in the past, returns [Duration.zero].
+  /// Returns `null` when [headerValue] is `null`, blank, or matches neither
+  /// permitted form — callers should then fall back to their own backoff.
+  /// A delay already in the past, or a negative delta, yields [Duration.zero].
+  ///
+  /// [now] overrides the reference point for HTTP-date values; it defaults to
+  /// [clock], so `withClock` applies.
   static Duration? parse(String? headerValue, {DateTime? now}) {
     if (headerValue == null) return null;
     final trimmed = headerValue.trim();
     if (trimmed.isEmpty) return null;
 
-    // 1. Delta-seconds
     final seconds = int.tryParse(trimmed);
     if (seconds != null) {
-      return seconds < 0 ? Duration.zero : Duration(seconds: seconds);
+      return seconds <= 0 ? Duration.zero : Duration(seconds: seconds);
     }
 
-    // 2. HTTP-date
     try {
-      final date = HttpDate.parse(trimmed);
-      final referenceTime = now ?? DateTime.now();
-      final diff = date.difference(referenceTime);
+      final date = http_parser.parseHttpDate(trimmed);
+      final diff = date.difference(now ?? clock.now());
       return diff.isNegative ? Duration.zero : diff;
-    } catch (_) {
+    } on FormatException {
       return null;
     }
   }
 }
 
-/// HTTP failure and retry classification helpers.
+/// Decides which HTTP outcomes count as backend failures and which are worth
+/// retrying.
+///
+/// The two questions are distinct and answered by two predicates:
+///
+/// - [isFailure] — *does this count against the backend?* Drives the circuit
+///   breaker and adaptive throttling. A `404` is a perfectly healthy response
+///   to a bad URL, so it must not open a breaker.
+/// - [isTransient] — *is another attempt likely to fare better?* Drives retry.
+///   Strictly narrower: a `500` is a genuine backend failure, yet replaying a
+///   non-idempotent request against it is rarely the right call.
 final class HttpClassifier {
   HttpClassifier._();
 
-  /// Returns `true` if [statusCode] represents a 5xx Server Error.
+  /// Whether [statusCode] is a 5xx Server Error.
   static bool isServerError(int statusCode) =>
       statusCode >= 500 && statusCode < 600;
 
-  /// Returns `true` if [statusCode] represents a 4xx Client Error.
+  /// Whether [statusCode] is a 4xx Client Error.
   static bool isClientError(int statusCode) =>
       statusCode >= 400 && statusCode < 500;
 
-  /// Returns `true` if [statusCode] is typically transient and safe to retry
-  /// (429 Too Many Requests, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout).
-  static bool isTransientStatus(int statusCode) {
-    return statusCode == 429 ||
-        statusCode == 502 ||
-        statusCode == 503 ||
-        statusCode == 504;
-  }
-
-  /// Default failure classifier for HTTP operations.
+  /// Whether [statusCode] denotes a condition that typically clears on its own.
   ///
-  /// Classifies 5xx server errors and network/transport failures as failures.
-  /// Client errors (4xx except 429) are classified as non-failures so they do
-  /// not trip the circuit breaker.
-  static bool defaultFailureClassifier(Object error, [StackTrace? stackTrace]) {
+  /// Covers `408` Request Timeout, `425` Too Early, `429` Too Many Requests,
+  /// `502` Bad Gateway, `503` Service Unavailable and `504` Gateway Timeout.
+  static bool isTransientStatus(int statusCode) =>
+      const {408, 425, 429, 502, 503, 504}.contains(statusCode);
+
+  /// Whether [error] should count against the backend's health.
+  ///
+  /// Server errors (5xx), rate limiting (`429`) and transport failures count.
+  /// Other client errors (4xx) and programmer errors do not: they say nothing
+  /// about backend health, and letting them accumulate would open the circuit
+  /// for every caller because one caller sent a bad request or an expired
+  /// token.
+  ///
+  /// Pass to [ResourceConfig.failureClassifier]; [httpResourceConfig] and
+  /// [httpPolicy] do so by default.
+  static bool isFailure(Object error) {
     if (error is HttpResponseException) {
-      final status = error.statusCode;
-      if (isClientError(status) && status != 429) {
-        return false;
-      }
-      return true;
+      return !isClientError(error.statusCode) || error.statusCode == 429;
     }
     if (error is ArgumentError ||
         error is TypeError ||
@@ -123,12 +160,17 @@ final class HttpClassifier {
     return true;
   }
 
-  /// Predicate determining whether an error is transient and should be retried.
+  /// Whether [error] is worth another attempt.
   ///
-  /// Returns `true` for transient HTTP status codes (429, 502, 503, 504) and
-  /// transport exceptions ([SocketException], [http.ClientException], [TimeoutException]).
-  /// Returns `false` for programmer errors and non-transient client errors (4xx).
-  static bool isTransient(Object error, [StackTrace? stackTrace]) {
+  /// True for the statuses in [isTransientStatus] and for transport failures
+  /// ([http.ClientException], [TimeoutException]). False for everything else,
+  /// including 5xx statuses other than `502`/`503`/`504` — a bare `500` means
+  /// the server has already processed something and gone wrong, so retrying a
+  /// non-idempotent request risks duplicating it.
+  ///
+  /// Widen this per call via `executeHttp`'s `retryOn` when the request is
+  /// known to be idempotent.
+  static bool isTransient(Object error) {
     if (error is HttpResponseException) {
       return isTransientStatus(error.statusCode);
     }
@@ -139,129 +181,268 @@ final class HttpClassifier {
         error is RangeError) {
       return false;
     }
-    if (error is SocketException ||
-        error is http.ClientException ||
-        error is HttpException ||
-        error is TlsException ||
-        error is TimeoutException) {
-      return true;
-    }
-    return false;
+    return error is http.ClientException || error is TimeoutException;
   }
 
-  /// A [RetryDelaySuggestion] that honours the server's `Retry-After` header.
+  /// A [RetryDelaySuggestion] honouring the server's `Retry-After` header.
   ///
-  /// Returns the parsed header value when [error] is an [HttpResponseException]
-  /// carrying a well-formed `Retry-After`, and `null` otherwise — in which case
-  /// the configured exponential backoff applies as usual. The core clamps the
-  /// returned value to [RetryConfig.maxDelay], so a server cannot stall a call
-  /// indefinitely by asking for an absurd delay.
-  ///
-  /// Wire it into a [RetryConfig]:
+  /// Yields the parsed header when [error] is an [HttpResponseException]
+  /// carrying a well-formed `Retry-After`, and `null` otherwise, leaving the
+  /// configured exponential backoff in charge. The core caps the result at
+  /// [RetryConfig.maxDelay], so a server cannot stall a call indefinitely.
   ///
   /// ```dart
   /// RetryConfig(
-  ///   maxAttempts: 4,
   ///   maxDelay: const Duration(seconds: 30),
   ///   suggestedDelay: HttpClassifier.retryAfterDelay,
   /// )
   /// ```
-  static Duration? retryAfterDelay(int attempt, Object error) {
-    if (error is HttpResponseException) return error.retryAfter;
-    return null;
-  }
+  static Duration? retryAfterDelay(int attempt, Object error) =>
+      error is HttpResponseException ? error.retryAfter : null;
 }
 
-/// Extension providing HTTP execution methods on [ResiliencePolicy].
-extension ResilientPolicyHttpExtension on ResiliencePolicy {
-  /// Executes an HTTP request created by [requestFactory] through this policy.
+/// Builds a [ResourceConfig] with HTTP-aware failure classification.
+///
+/// Identical to constructing [ResourceConfig] directly except that
+/// [failureClassifier] defaults to [HttpClassifier.isFailure] rather than the
+/// core's generic classifier. Without that substitution every `404` and `401`
+/// counts as a backend failure and will eventually open the circuit — prefer
+/// this over a hand-rolled [ResourceConfig] for anything speaking HTTP.
+///
+/// Use with a named [Resource]:
+///
+/// ```dart
+/// final api = Resource('users-api', config: httpResourceConfig(
+///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
+/// ));
+/// ```
+ResourceConfig httpResourceConfig({
+  CircuitBreakerConfig? circuitBreaker,
+  RetryConfig? retry,
+  ThrottlingConfig? throttling,
+  HedgingConfig? hedging,
+  Duration? timeout,
+  bool Function(Object)? failureClassifier,
+}) {
+  return ResourceConfig(
+    circuitBreaker: circuitBreaker,
+    retry: retry ?? RetryConfig(suggestedDelay: HttpClassifier.retryAfterDelay),
+    throttling: throttling,
+    hedging: hedging,
+    timeout: timeout,
+    failureClassifier: failureClassifier ?? HttpClassifier.isFailure,
+  );
+}
+
+/// Builds a standalone [ResiliencePolicy] with HTTP-aware defaults.
+///
+/// Like [httpResourceConfig], but self-contained: no [ResilienceContext] or
+/// named [Resource] required. [failureClassifier] defaults to
+/// [HttpClassifier.isFailure], and an unspecified [retry] honours
+/// `Retry-After` via [HttpClassifier.retryAfterDelay].
+///
+/// ```dart
+/// final policy = httpPolicy(
+///   circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 5),
+/// );
+/// final response = await policy.executeHttp(client, () => request);
+/// ```
+ResiliencePolicy httpPolicy({
+  CircuitBreakerConfig? circuitBreaker,
+  RetryConfig? retry,
+  ThrottlingConfig? throttling,
+  HedgingConfig? hedging,
+  Duration? timeout,
+  bool Function(Object)? failureClassifier,
+}) {
+  return ResiliencePolicy(
+    circuitBreaker: circuitBreaker,
+    retry: retry ?? RetryConfig(suggestedDelay: HttpClassifier.retryAfterDelay),
+    throttling: throttling,
+    hedging: hedging,
+    timeout: timeout,
+    failureClassifier: failureClassifier ?? HttpClassifier.isFailure,
+  );
+}
+
+/// Issues one attempt: build a fresh request, send it, and read the body to
+/// completion under [cancelCompleter].
+Future<http.Response> _attempt({
+  required http.Client client,
+  required FutureOr<http.BaseRequest> Function() requestFactory,
+  required Completer<void> cancelCompleter,
+  required bool Function(http.Response response)? validateStatus,
+  required String? resourceName,
+}) async {
+  final request = await requestFactory();
+  final streamed = await client.send(request);
+  final response = await _readBody(streamed, cancelCompleter);
+
+  final accepted = validateStatus?.call(response) ?? response.statusCode < 400;
+  if (!accepted) {
+    throw HttpResponseException(response, resourceName: resourceName);
+  }
+  return response;
+}
+
+/// Drains [streamed] into a buffered [http.Response], aborting the connection
+/// if [cancelCompleter] completes first.
+///
+/// Cancelling the subscription is what actually releases the socket; without
+/// it a losing hedge or a timed-out request keeps draining bytes nobody will
+/// read, and the hedge concurrency slot is never returned.
+Future<http.Response> _readBody(
+  http.StreamedResponse streamed,
+  Completer<void> cancelCompleter,
+) {
+  final completer = Completer<http.Response>();
+  final buffer = BytesBuilder(copy: false);
+
+  final subscription = streamed.stream.listen(
+    buffer.add,
+    cancelOnError: true,
+    onError: (Object error, StackTrace stackTrace) {
+      if (!completer.isCompleted) completer.completeError(error, stackTrace);
+    },
+    onDone: () {
+      if (completer.isCompleted) return;
+      completer.complete(
+        http.Response.bytes(
+          buffer.takeBytes(),
+          streamed.statusCode,
+          request: streamed.request,
+          headers: streamed.headers,
+          isRedirect: streamed.isRedirect,
+          persistentConnection: streamed.persistentConnection,
+          reasonPhrase: streamed.reasonPhrase,
+        ),
+      );
+    },
+  );
+
+  unawaited(
+    cancelCompleter.future
+        .then((_) async {
+          if (completer.isCompleted) return;
+          await subscription.cancel();
+          if (!completer.isCompleted) {
+            completer.completeError(
+              const OperationCancelledException(
+                'HTTP request aborted before the response body was received',
+              ),
+            );
+          }
+        })
+        .catchError((_) {}),
+  );
+
+  return completer.future;
+}
+
+/// Adds HTTP execution to [ResiliencePolicy].
+extension ResiliencePolicyHttp on ResiliencePolicy {
+  /// Sends the request built by [requestFactory] under this policy.
   ///
-  /// Every attempt calls [requestFactory] to produce a fresh [http.Request],
-  /// avoiding the single-use limitation of finalized requests during retries or hedging.
+  /// [requestFactory] is invoked once per attempt, so retries and hedges each
+  /// get a fresh [http.BaseRequest]; a finalized request cannot be replayed.
+  /// It may return any [http.BaseRequest], including [http.MultipartRequest].
   ///
-  /// Awaits the full response stream via [http.Response.fromStream] before declaring
-  /// the attempt complete. If [validateStatus] is omitted, any response with
-  /// status code >= 400 throws an [HttpResponseException].
+  /// The response body is read to completion before the attempt is considered
+  /// successful, so a mid-stream disconnect is recorded as the failure it is.
+  /// If the surrounding policy cancels the attempt — a lost hedge, or an
+  /// expired deadline — the connection is aborted rather than left draining.
   ///
-  /// It is an error if [requestFactory] returns a request whose body cannot be read.
+  /// By default any status below 400 is accepted, which includes a surfaced
+  /// 3xx (relevant only when redirects are disabled); supply [validateStatus]
+  /// for anything stricter. A rejected status throws [HttpResponseException].
   ///
-  /// Throws [HttpResponseException] if the response fails status validation.
-  /// Throws [ResilienceException] if circuit breaker is open, request is throttled,
-  /// or execution times out.
+  /// [retryOn] defaults to [HttpClassifier.isTransient], which is intentionally
+  /// narrower than the policy's failure classifier: an error can count against
+  /// the breaker without being safe to replay. Widen it for idempotent
+  /// requests.
+  ///
+  /// Throws [HttpResponseException] if the status is rejected,
+  /// [CircuitBreakerOpenException] if the circuit is open, [ThrottledException]
+  /// if shed by adaptive throttling, [ResilienceTimeoutException] on deadline
+  /// expiry, and [OperationCancelledException] if cancelled via [cancelToken].
   Future<http.Response> executeHttp(
     http.Client client,
-    FutureOr<http.Request> Function() requestFactory, {
+    FutureOr<http.BaseRequest> Function() requestFactory, {
     Duration? timeout,
     Criticality criticality = Criticality.critical,
     bool Function(http.Response response)? validateStatus,
     bool Function(Object error)? retryOn,
+    CancellationToken? cancelToken,
   }) {
-    return execute(
-      () async {
-        final request = await requestFactory();
-        final streamedResponse = await client.send(request);
-        final response = await http.Response.fromStream(streamedResponse);
-
-        final isValid = validateStatus != null
-            ? validateStatus(response)
-            : response.statusCode < 400;
-
-        if (!isValid) {
-          throw HttpResponseException(response);
-        }
-
-        return response;
-      },
+    return executeCancelable(
+      (cancelCompleter) => _attempt(
+        client: client,
+        requestFactory: requestFactory,
+        cancelCompleter: cancelCompleter,
+        validateStatus: validateStatus,
+        resourceName: resource.name,
+      ),
       retryOn: retryOn ?? HttpClassifier.isTransient,
       criticality: criticality,
       timeout: timeout,
+      cancellationToken: cancelToken,
     );
   }
 }
 
-/// Extension providing HTTP execution methods on [ResilienceContext].
-extension ResilientContextHttpExtension on ResilienceContext {
-  /// Executes an HTTP request created by [requestFactory] through this context for [resource].
+/// Adds HTTP execution to [ResilienceContext].
+extension ResilienceContextHttp on ResilienceContext {
+  /// Sends the request built by [requestFactory] under the policies of
+  /// [target].
   ///
-  /// Every attempt calls [requestFactory] to produce a fresh [http.Request],
-  /// avoiding the single-use limitation of finalized requests during retries or hedging.
+  /// [target] accepts any [ResilienceTarget]: a [Resource] for defaults, or an
+  /// [Operation] to attach a [Criticality] and per-call overrides — which is
+  /// how a `sheddable` bulk sync is shed ahead of `criticalPlus` checkout
+  /// traffic against the same host.
   ///
-  /// Awaits the full response stream via [http.Response.fromStream] before declaring
-  /// the attempt complete. If [validateStatus] is omitted, any response with
-  /// status code >= 400 throws an [HttpResponseException].
+  /// [requestFactory] is invoked once per attempt, so retries and hedges each
+  /// get a fresh [http.BaseRequest]; a finalized request cannot be replayed.
+  /// It may return any [http.BaseRequest], including [http.MultipartRequest].
   ///
-  /// It is an error if [requestFactory] returns a request whose body cannot be read.
+  /// The response body is read to completion before the attempt is considered
+  /// successful, so a mid-stream disconnect is recorded as the failure it is.
+  /// If the surrounding policy cancels the attempt — a lost hedge, or an
+  /// expired deadline — the connection is aborted rather than left draining.
   ///
-  /// Throws [HttpResponseException] if the response fails status validation.
-  /// Throws [ResilienceException] if circuit breaker is open, request is throttled,
-  /// or execution times out.
+  /// By default any status below 400 is accepted, which includes a surfaced
+  /// 3xx (relevant only when redirects are disabled); supply [validateStatus]
+  /// for anything stricter. A rejected status throws [HttpResponseException].
+  ///
+  /// [retryOn] defaults to [HttpClassifier.isTransient], which is intentionally
+  /// narrower than the resource's failure classifier: an error can count
+  /// against the breaker without being safe to replay. Widen it for idempotent
+  /// requests.
+  ///
+  /// Throws [HttpResponseException] if the status is rejected,
+  /// [CircuitBreakerOpenException] if the circuit is open, [ThrottledException]
+  /// if shed by adaptive throttling, [ResilienceTimeoutException] on deadline
+  /// expiry, and [OperationCancelledException] if cancelled via [cancelToken].
   Future<http.Response> executeHttp(
-    Resource resource,
+    ResilienceTarget target,
     http.Client client,
-    FutureOr<http.Request> Function() requestFactory, {
+    FutureOr<http.BaseRequest> Function() requestFactory, {
     Duration? timeout,
     bool Function(http.Response response)? validateStatus,
     bool Function(Object error)? retryOn,
+    CancellationToken? cancelToken,
   }) {
-    return execute(
-      resource,
-      () async {
-        final request = await requestFactory();
-        final streamedResponse = await client.send(request);
-        final response = await http.Response.fromStream(streamedResponse);
-
-        final isValid = validateStatus != null
-            ? validateStatus(response)
-            : response.statusCode < 400;
-
-        if (!isValid) {
-          throw HttpResponseException(response, resourceName: resource.name);
-        }
-
-        return response;
-      },
+    return executeCancelable(
+      target,
+      (cancelCompleter) => _attempt(
+        client: client,
+        requestFactory: requestFactory,
+        cancelCompleter: cancelCompleter,
+        validateStatus: validateStatus,
+        resourceName: target.resource.name,
+      ),
       retryOn: retryOn ?? HttpClassifier.isTransient,
       timeout: timeout,
+      cancellationToken: cancelToken,
     );
   }
 }

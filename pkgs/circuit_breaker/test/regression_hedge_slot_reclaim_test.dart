@@ -13,7 +13,9 @@ void main() {
             enabled: true,
             delay: const Duration(milliseconds: 10),
             maxConcurrentHedges: 2,
-            gracePeriod: const Duration(milliseconds: 40),
+            // Generous, so the "slot still held" assertion below cannot race
+            // scheduling noise when the suite runs in parallel.
+            gracePeriod: const Duration(milliseconds: 500),
             maxOverloadTokens: 10.0,
             overloadPercentile: 0.0, // refill on every request
           ),
@@ -69,8 +71,8 @@ void main() {
         // Because activeHedges was 2, tryStartHedge() was rejected; only 1 attempt ran
         expect(call3Attempts, equals(1));
 
-        // Wait for the gracePeriod (40ms) to elapse + safety margin
-        await Future.delayed(const Duration(milliseconds: 60));
+        // Wait for the gracePeriod (500ms) to elapse + safety margin
+        await Future.delayed(const Duration(milliseconds: 650));
 
         // Concurrency slots must have been reclaimed!
         expect(
