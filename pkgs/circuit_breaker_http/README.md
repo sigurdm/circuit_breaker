@@ -14,7 +14,7 @@ Instead, `circuit_breaker_http` operates at the **operation boundary** using a r
 
 - **`executeHttp`**: Extension on `ResiliencePolicy` and `ResilienceContext` that executes requests via a factory function, awaiting the full response before recording success.
 - **`HttpClassifier`**: Failure and retry predicates that distinguish 5xx server errors and network dropouts from 4xx client errors (so client bugs or typos never trip your circuit breaker).
-- **`RetryAfterParser`**: RFC 9110 compliant parser for `Retry-After` headers supporting both delta-seconds (`120`) and HTTP dates (`Wed, 21 Oct 2026 07:28:00 GMT`).
+- **`Retry-After` support**: `HttpClassifier.retryAfterDelay` plugs into `RetryConfig.suggestedDelay` so backoff waits exactly as long as the server asked, instead of guessing. Backed by `RetryAfterParser`, an RFC 9110 compliant parser accepting both delta-seconds (`120`) and HTTP dates (`Wed, 21 Oct 2026 07:28:00 GMT`).
 - **`HttpResponseException`**: Typed exception carrying the full `http.Response`, status code, headers, and parsed `retryAfter`.
 
 ## Usage
@@ -29,6 +29,9 @@ final policy = ResiliencePolicy(
   retry: RetryConfig(
     maxAttempts: 3,
     baseDelay: Duration(milliseconds: 200),
+    maxDelay: Duration(seconds: 30),
+    // Wait as long as a 429/503 asked us to, instead of guessing.
+    suggestedDelay: HttpClassifier.retryAfterDelay,
   ),
   failureClassifier: HttpClassifier.defaultFailureClassifier,
 );

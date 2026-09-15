@@ -168,4 +168,102 @@ void main() {
       expect(clientInvocations, equals(1));
     });
   });
+
+  group('HttpClassifier.retryAfterDelay', () {
+    test('extracts the Retry-After header from an HTTP error', () {
+      final rateLimited = HttpResponseException(
+        http.Response('slow down', 429, headers: {'retry-after': '7'}),
+      );
+      expect(
+        HttpClassifier.retryAfterDelay(1, rateLimited),
+        equals(const Duration(seconds: 7)),
+      );
+    });
+
+    test('defers to standard backoff when there is no usable header', () {
+      final noHeader = HttpResponseException(http.Response('down', 503));
+      final garbage = HttpResponseException(
+        http.Response('down', 503, headers: {'retry-after': 'soonish'}),
+      );
+
+      expect(HttpClassifier.retryAfterDelay(1, noHeader), isNull);
+      expect(HttpClassifier.retryAfterDelay(1, garbage), isNull);
+      expect(
+        HttpClassifier.retryAfterDelay(1, StateError('unrelated')),
+        isNull,
+      );
+    });
+
+    test('actually paces retries when wired into RetryConfig', () async {
+      var attempts = 0;
+      final client = MockClient((request) async {
+        attempts++;
+        if (attempts == 1) {
+          return http.Response('slow down', 429, headers: {'retry-after': '1'});
+        }
+        return http.Response('ok', 200);
+      });
+
+      final policy = ResiliencePolicy(
+        retry: RetryConfig(
+          maxAttempts: 2,
+          // Backoff alone would retry almost immediately; the header must win.
+          baseDelay: const Duration(milliseconds: 1),
+          maxDelay: const Duration(seconds: 30),
+          enableJitter: false,
+          suggestedDelay: HttpClassifier.retryAfterDelay,
+        ),
+      );
+
+      final stopwatch = Stopwatch()..start();
+      final response = await policy.executeHttp(
+        client,
+        () => http.Request('GET', Uri.parse('https://example.com/limited')),
+      );
+      stopwatch.stop();
+
+      expect(response.statusCode, 200);
+      expect(attempts, 2);
+      expect(
+        stopwatch.elapsed,
+        greaterThanOrEqualTo(const Duration(milliseconds: 900)),
+        reason: 'must have waited out the Retry-After, not the 1ms backoff',
+      );
+    });
+
+    test('maxDelay caps a hostile Retry-After', () async {
+      var attempts = 0;
+      final client = MockClient((request) async {
+        attempts++;
+        if (attempts == 1) {
+          return http.Response(
+            'go away',
+            503,
+            headers: {'retry-after': '86400'}, // one day
+          );
+        }
+        return http.Response('ok', 200);
+      });
+
+      final policy = ResiliencePolicy(
+        retry: RetryConfig(
+          maxAttempts: 2,
+          baseDelay: const Duration(milliseconds: 1),
+          maxDelay: const Duration(milliseconds: 50),
+          enableJitter: false,
+          suggestedDelay: HttpClassifier.retryAfterDelay,
+        ),
+      );
+
+      final response = await policy
+          .executeHttp(
+            client,
+            () => http.Request('GET', Uri.parse('https://example.com/limited')),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      expect(response.statusCode, 200);
+      expect(attempts, 2);
+    });
+  });
 }

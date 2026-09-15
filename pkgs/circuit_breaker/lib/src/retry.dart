@@ -77,8 +77,9 @@ Future<T> executeWithRetry<T>(
         );
       }
 
-      // Calculate delay with exponential backoff and full jitter
-      final delay = _calculateDelay(attempts, retryConfig);
+      // Calculate delay: a suggestion carried by the error wins, otherwise
+      // exponential backoff with full jitter.
+      final delay = _calculateDelay(attempts, retryConfig, e);
 
       final res = resource;
       if (res != null) {
@@ -136,7 +137,24 @@ Future<T> executeWithRetry<T>(
   }
 }
 
-Duration _calculateDelay(int attempt, RetryConfig config) {
+Duration _calculateDelay(int attempt, RetryConfig config, Object error) {
+  final suggest = config.suggestedDelay;
+  if (suggest != null) {
+    Duration? suggested;
+    try {
+      suggested = suggest(attempt, error);
+    } catch (_) {
+      // A faulty hook must not break retrying; fall through to backoff.
+      suggested = null;
+    }
+    if (suggested != null) {
+      if (suggested <= Duration.zero) return Duration.zero;
+      // Deliberately un-jittered: an explicitly stated delay is honoured as
+      // given, only capped so a hostile or absurd value cannot stall the call.
+      return suggested > config.maxDelay ? config.maxDelay : suggested;
+    }
+  }
+
   if (config.baseDelay == Duration.zero) {
     return Duration.zero;
   }
@@ -196,6 +214,7 @@ final class Retry {
     Duration? timeout,
     bool Function(Object)? failureClassifier,
     bool Function(Object)? retryOn,
+    RetryDelaySuggestion? suggestedDelay,
     ResourceState? state,
   }) {
     final retryConfig =
@@ -206,6 +225,7 @@ final class Retry {
           maxDelay: maxDelay ?? const Duration(seconds: 10),
           backoffFactor: backoffFactor ?? 2.0,
           enableJitter: enableJitter ?? true,
+          suggestedDelay: suggestedDelay,
         );
     final cfg = ResourceConfig(
       retry: retryConfig,
@@ -377,6 +397,7 @@ Future<T> retry<T>(
   bool Function(Object)? retryOn,
   Duration? timeout,
   bool Function(Object)? failureClassifier,
+  RetryDelaySuggestion? suggestedDelay,
   RetryConfig? config,
   ResilienceContext? context,
   String? resourceName,
@@ -393,7 +414,8 @@ Future<T> retry<T>(
       baseDelay == const Duration(milliseconds: 100) &&
       maxDelay == const Duration(seconds: 10) &&
       backoffFactor == 2.0 &&
-      enableJitter == true) {
+      enableJitter == true &&
+      suggestedDelay == null) {
     effectiveConfig = existingState.config.retry;
   } else {
     effectiveConfig = RetryConfig(
@@ -402,6 +424,7 @@ Future<T> retry<T>(
       maxDelay: maxDelay,
       backoffFactor: backoffFactor,
       enableJitter: enableJitter,
+      suggestedDelay: suggestedDelay,
     );
   }
 

@@ -14,6 +14,7 @@ Initial release of `circuit_breaker`, a production-grade resilience engineering 
   - Exponential backoff with configurable base delay, max delay, and full jitter to prevent thundering herds.
   - Client-side retry budget to bound retries to a percentage of total requests (Google SRE pattern).
   - Custom failure classification via `failureClassifier` predicates.
+  - `RetryConfig.suggestedDelay` hook letting an error state its own retry timing (e.g. an HTTP `Retry-After` header) in place of the computed backoff.
   - Zero-boilerplate `retry(...)` function and stateful `Retry.standalone`.
 
 - **Adaptive Throttling & Criticality**:

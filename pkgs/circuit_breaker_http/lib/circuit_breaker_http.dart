@@ -148,6 +148,28 @@ final class HttpClassifier {
     }
     return false;
   }
+
+  /// A [RetryDelaySuggestion] that honours the server's `Retry-After` header.
+  ///
+  /// Returns the parsed header value when [error] is an [HttpResponseException]
+  /// carrying a well-formed `Retry-After`, and `null` otherwise — in which case
+  /// the configured exponential backoff applies as usual. The core clamps the
+  /// returned value to [RetryConfig.maxDelay], so a server cannot stall a call
+  /// indefinitely by asking for an absurd delay.
+  ///
+  /// Wire it into a [RetryConfig]:
+  ///
+  /// ```dart
+  /// RetryConfig(
+  ///   maxAttempts: 4,
+  ///   maxDelay: const Duration(seconds: 30),
+  ///   suggestedDelay: HttpClassifier.retryAfterDelay,
+  /// )
+  /// ```
+  static Duration? retryAfterDelay(int attempt, Object error) {
+    if (error is HttpResponseException) return error.retryAfter;
+    return null;
+  }
 }
 
 /// Extension providing HTTP execution methods on [ResiliencePolicy].

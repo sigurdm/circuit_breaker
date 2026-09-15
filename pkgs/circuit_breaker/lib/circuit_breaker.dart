@@ -31,6 +31,7 @@ export 'src/context.dart'
         ResourceConfig,
         CircuitBreakerConfig,
         RetryConfig,
+        RetryDelaySuggestion,
         ThrottlingConfig,
         HedgingConfig,
         CircuitState,

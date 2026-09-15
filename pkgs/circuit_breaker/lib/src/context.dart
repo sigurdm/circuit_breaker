@@ -585,6 +585,20 @@ final class CircuitBreakerConfig {
   );
 }
 
+/// Derives a retry delay from the error that caused an attempt to fail.
+///
+/// Returning `null` means "no suggestion": the standard exponential backoff
+/// (with jitter, if enabled) is used for this attempt. Returning a [Duration]
+/// overrides the computed backoff, clamped to [RetryConfig.maxDelay].
+///
+/// [attempt] is the 1-based number of the attempt that just failed, and [error]
+/// is the exception it threw.
+///
+/// This exists so that protocols able to state when to come back — most
+/// commonly the HTTP `Retry-After` header — can be honoured instead of guessed
+/// at. See `package:circuit_breaker_http` for an implementation.
+typedef RetryDelaySuggestion = Duration? Function(int attempt, Object error);
+
 /// Configuration for the Retry pattern with Exponential Backoff and Jitter.
 ///
 /// Retrying transient failures can increase application availability.
@@ -631,6 +645,21 @@ final class RetryConfig {
   /// The duration of the rolling window used to calculate the retry budget.
   final Duration budgetWindow;
 
+  /// Optional hook deriving the retry delay from the error that just failed.
+  ///
+  /// When it returns a non-null [Duration], that value replaces the computed
+  /// exponential backoff for this attempt (clamped to [maxDelay], and not
+  /// jittered — a server-mandated delay should be honoured as stated). When it
+  /// returns `null`, or is itself `null`, standard backoff applies.
+  ///
+  /// If this callback throws, the error is swallowed and standard backoff is
+  /// used, so a faulty hook cannot break retrying.
+  ///
+  /// > Note: honouring a delay the server handed to many clients at once can
+  /// > re-synchronise them. Where that matters, have the hook add its own
+  /// > spread.
+  final RetryDelaySuggestion? suggestedDelay;
+
   /// Creates a [RetryConfig].
   ///
   /// Throws [ArgumentError] if:
@@ -650,6 +679,7 @@ final class RetryConfig {
     this.minRequestsForBudget = 10,
     this.retryBudgetRatio = 0.1,
     this.budgetWindow = const Duration(minutes: 1),
+    this.suggestedDelay,
   }) {
     if (maxAttempts < 1) {
       throw ArgumentError.value(maxAttempts, 'maxAttempts', 'must be >= 1');
@@ -710,6 +740,7 @@ final class RetryConfig {
     int? minRequestsForBudget,
     double? retryBudgetRatio,
     Duration? budgetWindow,
+    RetryDelaySuggestion? suggestedDelay,
   }) {
     return RetryConfig(
       maxAttempts: maxAttempts ?? this.maxAttempts,
@@ -720,6 +751,7 @@ final class RetryConfig {
       minRequestsForBudget: minRequestsForBudget ?? this.minRequestsForBudget,
       retryBudgetRatio: retryBudgetRatio ?? this.retryBudgetRatio,
       budgetWindow: budgetWindow ?? this.budgetWindow,
+      suggestedDelay: suggestedDelay ?? this.suggestedDelay,
     );
   }
 
@@ -735,7 +767,8 @@ final class RetryConfig {
           enableJitter == other.enableJitter &&
           minRequestsForBudget == other.minRequestsForBudget &&
           retryBudgetRatio == other.retryBudgetRatio &&
-          budgetWindow == other.budgetWindow;
+          budgetWindow == other.budgetWindow &&
+          suggestedDelay == other.suggestedDelay;
 
   @override
   int get hashCode => Object.hash(
@@ -747,6 +780,7 @@ final class RetryConfig {
     minRequestsForBudget,
     retryBudgetRatio,
     budgetWindow,
+    suggestedDelay,
   );
 }
 
