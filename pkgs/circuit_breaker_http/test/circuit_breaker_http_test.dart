@@ -209,6 +209,7 @@ void main() {
       final policy = httpPolicy(
         circuitBreaker: CircuitBreakerConfig(consecutiveFailuresThreshold: 2),
         retry: RetryConfig(maxAttempts: 1),
+        throttling: ThrottlingConfig(minRequests: 100),
       );
 
       for (var i = 0; i < 2; i++) {
